@@ -42,6 +42,7 @@
 static __thread psched_t psched;		/* per-thread scheduler structure */
 
 static void deadlock (void) __attribute__ ((noreturn));
+static void slick_schedule (psched_t *s) __attribute__ ((noreturn));
 
 
 /*{{{  static void deadlock (void)*/
@@ -106,6 +107,7 @@ static void slick_schedule (psched_t *s)
 		"	movq	32(%%rbx), %%rsp	\n" \
 		"	jmp	*%%rax			\n" \
 		:: "a" (w), "b" (s) : "rcx", "rdx", "rdi", "rsi", "memory", "cc");
+	_exit (42);		/* assert: never get here (prevent gcc warning about returning non-return function) */
 }
 /*}}}*/
 
@@ -137,5 +139,98 @@ void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
 	}
 }
 /*}}}*/
+/*{{{  void os_chanout (workspace_t w, void **chanptr, const void *addr, const int count)*/
+/*
+ *	channel output
+ */
+void os_chanout (workspace_t w, void **chanptr, const void *addr, const int count)
+{
+	if (*chanptr == NULL) {
+		/* nothing here yet, place ourselves and deschedule */
+		w[LIPtr] = (uint64_t)__builtin_return_address (0);
+		w[LPriofinity] = 0;						/* FIXME */
+		w[LPointer] = (uint64_t)addr;
+
+		*chanptr = (void *)w;
+
+		slick_schedule (&psched);
+	} else {
+		/* other here, copy and reschedule */
+		workspace_t other = (workspace_t)*chanptr;
+		void *dst = (void *)other[LPointer];
+
+		memcpy (dst, addr, count);
+		*chanptr = NULL;
+
+		enqueue (other, &psched);
+	}
+}
+/*}}}*/
+/*{{{  void os_runp (workspace_t w, workspace_t other)*/
+/*
+ *	run process: just pop it on the run-queue (simple enqueue for generated code)
+ */
+void os_runp (workspace_t w, workspace_t other)
+{
+	enqueue (other, &psched);
+}
+/*}}}*/
+/*{{{  void os_stopp (workspace_t w)*/
+/*
+ *	stop process: save return address (and priof) and schedule another
+ */
+void os_stopp (workspace_t w)
+{
+	w[LIPtr] = (uint64_t)__builtin_return_address (0);
+	w[LPriofinity] = 0;							/* FIXME */
+
+	slick_schedule (&psched);
+}
+/*}}}*/
+/*{{{  void os_startp (workspace_t w, workspace_t other, void *entrypoint)*/
+/*
+ *	start process: setup a process and enqueue it
+ */
+void os_startp (workspace_t w, workspace_t other, void *entrypoint)
+{
+	other[LTemp] = (uint64_t)w;						/* parent workspace */
+	other[LIPtr] = (uint64_t)entrypoint;
+	other[LPriofinity] = 0;							/* FIXME */
+
+	enqueue (other, &psched);
+}
+/*}}}*/
+/*{{{  void os_endp (workspace_t w, workspace_t other)*/
+/*
+ *	end process: decrement par-count and reschedule if done
+ */
+void os_endp (workspace_t w, workspace_t other)
+{
+	other[LCount]--;
+	if (!other[LCount]) {
+		/* we were the last */
+		other[LPriofinity] = other[LSavedPri];
+		other[LIPtr] = other[LIPtrSucc];
+
+		enqueue (other, &psched);
+	}
+}
+/*}}}*/
+/*{{{  uint64_t os_ldtimer (workspace_t w)*/
+/*
+ *	read the current time in nanoseconds
+ */
+uint64_t os_ldtimer (workspace_t w)
+{
+	struct timespec ts;
+
+	if (clock_gettime (CLOCK_MONOTONIC_COARSE, &ts) != 0) {
+		slick_fatal ("clock_gettime() failed with: %s", strerror (errno));
+		return 0;
+	}
+	return (((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec);
+}
+/*}}}*/
+
 
 

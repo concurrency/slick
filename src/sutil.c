@@ -57,6 +57,44 @@ void slick_fatal (const char *fmt, ...)
 	_exit (EXIT_FAILURE);
 }
 /*}}}*/
+/*{{{  int slick_warning (const char *fmt, ...)*/
+/*
+ *	called in the event of something bad, but non-fatal
+ *	returns number of bytes written
+ */
+int slick_warning (const char *fmt, ...)
+{
+	va_list ap;
+	int r;
+
+	va_start (ap, fmt);
+	r = fprintf (stderr, "slick: warning: ");
+	r += vfprintf (stderr, fmt, ap);
+	r += fprintf (stderr, "\n");
+	va_end (ap);
+
+	return r;
+}
+/*}}}*/
+/*{{{  int slick_message (const char *fmt, ...)*/
+/*
+ *	called to report general messages
+ *	returns number of bytes written
+ */
+int slick_message (const char *fmt, ...)
+{
+	va_list ap;
+	int r;
+
+	va_start (ap, fmt);
+	r = fprintf (stderr, "slick: ");
+	r += vfprintf (stderr, fmt, ap);
+	r += fprintf (stderr, "\n");
+	va_end (ap);
+
+	return r;
+}
+/*}}}*/
 
 
 /*{{{  void *smalloc (const size_t bytes)*/

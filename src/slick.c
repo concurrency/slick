@@ -1,5 +1,5 @@
 /*
- *	sutil.h -- prototypes for utility routines
+ *	slick.c -- scheduler startup/interface
  *	Copyright (C) 2016 Fred Barnes, University of Kent <frmb@kent.ac.uk>
  *
  *	This library is free software; you can redistribute it and/or
@@ -18,16 +18,38 @@
  *	MA  02110-1301 USA
  */
 
-#ifndef __SUTIL_H
-#define __SUTIL_H
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
-extern void slick_fatal (const char *fmt, ...) __attribute__ ((format (printf, 1, 2), noreturn));
-extern int slick_warning (const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
-extern int slick_message (const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <time.h>
+#include <errno.h>
 
-extern void *smalloc (const size_t bytes);
-extern void sfree (void *ptr);
+#include <sched.h>
+#include <pthread.h>
+
+#include "slick.h"
+#include "slick_types.h"
+#include "sutil.h"
 
 
-#endif	/* !__SUTIL_H */
+
+/*{{{  int slick_init (const char **argv, const int argc)*/
+/*
+ *	called to initialise the scheduler (command-line arguments given)
+ *	returns 0 on success, non-zero on error
+ */
+int slick_init (const char **argv, const int argc)
+{
+	return 0;
+}
+/*}}}*/
 
