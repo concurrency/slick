@@ -198,6 +198,33 @@ void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
 	}
 }
 /*}}}*/
+/*{{{  void os_chanin64 (workspace_t w, void **chanptr, void *addr)*/
+/*
+ *	channel input (64-bit)
+ */
+void os_chanin64 (workspace_t w, void **chanptr, void *addr)
+{
+	if (*chanptr == NULL) {
+		/* nothing here yet, place ourselves and deschedule */
+		w[LIPtr] = (uint64_t)__builtin_return_address (0);
+		w[LPriofinity] = 0;
+		w[LPointer] = (uint64_t)addr;
+
+		*chanptr = (void *)w;
+
+		slick_schedule (&psched);
+	} else {
+		/* other here, copy and reschedule */
+		workspace_t other = (workspace_t)*chanptr;
+		const void *src = (const void *)other[LPointer];
+
+		*(uint64_t *)addr = *(uint64_t *)src;
+		*chanptr = NULL;
+
+		enqueue (other, &psched);
+	}
+}
+/*}}}*/
 /*{{{  void os_chanout (workspace_t w, void **chanptr, const void *addr, const int count)*/
 /*
  *	channel output
@@ -213,12 +240,46 @@ void os_chanout (workspace_t w, void **chanptr, const void *addr, const int coun
 		*chanptr = (void *)w;
 
 		slick_schedule (&psched);
+	} else if (((uint64_t)(*chanptr) & 0x0001000000000000) != 0) {
+		/* testing overhead of this */
+		slick_fatal ("impossible thing in os_chanout()");
 	} else {
 		/* other here, copy and reschedule */
 		workspace_t other = (workspace_t)*chanptr;
 		void *dst = (void *)other[LPointer];
 
 		memcpy (dst, addr, count);
+		*chanptr = NULL;
+
+		enqueue (other, &psched);
+	}
+}
+/*}}}*/
+/*{{{  void os_chanoutv64 (workspace_t w, void **chanptr, const uint64_t val)*/
+/*
+ *	channel output -- a 64-bit value to output is given, stored in w[LTemp] if channel not-ready
+ */
+void os_chanoutv64 (workspace_t w, void **chanptr, const uint64_t val)
+{
+	if (*chanptr == NULL) {
+		/* nothing here yet, place ourselves and deschedule */
+		w[LIPtr] = (uint64_t)__builtin_return_address (0);
+		w[LPriofinity] = 0;						/* FIXME */
+		w[LTemp] = val;
+		w[LPointer] = (uint64_t)(&w[LTemp]);
+
+		*chanptr = (void *)w;
+
+		slick_schedule (&psched);
+	} else if (((uint64_t)(*chanptr) & 0x0001000000000000) != 0) {
+		/* testing overhead of this */
+		slick_fatal ("impossible thing in os_chanoutv64()");
+	} else {
+		/* other here, copy and reschedule */
+		workspace_t other = (workspace_t)*chanptr;
+		void *dst = (void *)other[LPointer];
+
+		*(uint64_t *)dst = val;
 		*chanptr = NULL;
 
 		enqueue (other, &psched);
