@@ -1,5 +1,5 @@
 /*
- *	slick.h -- public header file for "slick" scheduler (include this to use)
+ *	slickasm.s -- bits and pieces of assembly for the scheduler
  *	Copyright (C) 2016 Fred Barnes, University of Kent <frmb@kent.ac.uk>
  *
  *	This library is free software; you can redistribute it and/or
@@ -18,12 +18,20 @@
  *	MA  02110-1301 USA
  */
 
-#ifndef __SLICK_H
-#define __SLICK_H
 
-extern int slick_init (const char **argv, const int argc);
-extern void slick_startup (void *ws, void (*proc)(void));
+.text
 
+.globl	slick_schedlinkage
+.type	slick_schedlinkage, @function
 
-#endif	/* !__SLICK_H */
+slick_schedlinkage:
+	movq	%rdi, %rax			/* address of psched_t structure for this scheduler (thread-local) */
+
+	movq	%rsp, 40(%rax)			/* save registers */
+	movq	%rbp, 48(%rax)
+	movq	%r10, 56(%rax)
+	movq	%r11, 64(%rax)
+
+	call	os_entry
+
 

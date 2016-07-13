@@ -24,6 +24,7 @@
 extern void slick_fatal (const char *fmt, ...) __attribute__ ((format (printf, 1, 2), noreturn));
 extern int slick_warning (const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 extern int slick_message (const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
+extern int slick_cmessage (const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 
 extern void *smalloc (const size_t bytes);
 extern void sfree (void *ptr);

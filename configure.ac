@@ -81,5 +81,5 @@ dnl Checks for typedefs, structures, and compiler characteristics.
 dnl Checks for library functions.
 AC_FUNC_VPRINTF
 
-AC_OUTPUT([Makefile src/Makefile])
+AC_OUTPUT([Makefile src/Makefile test/Makefile])
 

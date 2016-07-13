@@ -95,6 +95,23 @@ int slick_message (const char *fmt, ...)
 	return r;
 }
 /*}}}*/
+/*{{{  int slick_cmessage (const char *fmt, ...)*/
+/*
+ *	called to report general messages (verbatim)
+ *	returns number of bytes written
+ */
+int slick_cmessage (const char *fmt, ...)
+{
+	va_list ap;
+	int r;
+
+	va_start (ap, fmt);
+	r = vfprintf (stderr, fmt, ap);
+	va_end (ap);
+
+	return r;
+}
+/*}}}*/
 
 
 /*{{{  void *smalloc (const size_t bytes)*/

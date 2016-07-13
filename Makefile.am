@@ -10,6 +10,6 @@
 @SET_MAKE@
 AUTOMAKE_OPTIONS = foreign
 
-SUBDIRS = src
+SUBDIRS = src test
 
 EXTRA_DIST = README.md LICENSE

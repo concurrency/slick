@@ -44,6 +44,46 @@ static __thread psched_t psched;		/* per-thread scheduler structure */
 static void deadlock (void) __attribute__ ((noreturn));
 static void slick_schedule (psched_t *s) __attribute__ ((noreturn));
 
+static void enqueue (workspace_t w, psched_t *s);
+
+extern void slick_schedlinkage (psched_t *s) __attribute__ ((noreturn));
+
+
+/*{{{  void *slick_threadentry (void *arg)*/
+/*
+ *	pthreads entry-point
+ */
+void *slick_threadentry (void *arg)
+{
+	slickts_t *tinf = (slickts_t *)arg;
+
+	memset (&psched, 0, sizeof (psched_t));
+
+	psched.sptr = tinf->sptr;
+	psched.sidx = tinf->thridx;
+
+#if 1
+fprintf (stderr, "slick_threadentry(): here!  my thread id is %p, index %d\n", (void *)pthread_self (), psched.sidx);
+#endif
+
+#if 1
+fprintf (stderr, "slick_threadentry(): enqueue initial process at %p, entry-point %p\n", tinf->initial_ws, tinf->initial_proc);
+#endif
+	if (tinf->initial_ws && tinf->initial_proc) {
+		/* enqueue this process */
+		workspace_t iws = (workspace_t)tinf->initial_ws;
+
+		iws[LIPtr] = (uint64_t)tinf->initial_proc;
+		enqueue (iws, &psched);
+	}
+
+	slick_schedlinkage (&psched);
+
+	/* assert: never get here */
+	return NULL;
+}
+/*}}}*/
+
 
 /*{{{  static void deadlock (void)*/
 /*
@@ -104,14 +144,36 @@ static void slick_schedule (psched_t *s)
 	__asm__ __volatile__ ("				\n" \
 		"	movq	%%rax, %%rbp		\n" \
 		"	movq	-8(%%rbp), %%rax	\n" \
-		"	movq	32(%%rbx), %%rsp	\n" \
+		"	movq	32(%%rcx), %%rsp	\n" \
 		"	jmp	*%%rax			\n" \
-		:: "a" (w), "b" (s) : "rcx", "rdx", "rdi", "rsi", "memory", "cc");
+		:: "a" (w), "c" (s) : "rbx", "rdx", "rdi", "rsi", "memory", "cc");
 	_exit (42);		/* assert: never get here (prevent gcc warning about returning non-return function) */
 }
 /*}}}*/
 
 
+/*{{{  void os_entry (void)*/
+/*
+ *	entry-point from slick_schedlinkage
+ */
+void os_entry (void)
+{
+	slick_message ("scheduler entry for thread %d, saved SP is %p", psched.sidx, psched.saved_sp);
+
+	slick_schedule (&psched);
+}
+/*}}}*/
+/*{{{  void os_shutdown (workspace_t w)*/
+/*
+ *	called when return from the top-level thing
+ */
+void os_shutdown (workspace_t w)
+{
+	slick_message ("scheduler exit for process at %p", w);
+
+	pthread_exit (NULL);
+}
+/*}}}*/
 /*{{{  void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)*/
 /*
  *	channel input
