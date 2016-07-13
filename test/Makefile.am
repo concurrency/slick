@@ -6,7 +6,7 @@ AUTOMAKE_OPTIONS = foreign
 bin_PROGRAMS = commstime
 
 commstime_SOURCES = commstime.c commstime_code.s
-commstime_LDADD = -lslick -lpthread
+commstime_LDADD = @srcdir@/../src/libslick.a -lpthread
 
 CFLAGS = @CFLAGS@ -Wall -fomit-frame-pointer -D _GNU_SOURCE -I@srcdir@/../src
 LDFLAGS = @LDFLAGS@ -L@srcdir@/../src

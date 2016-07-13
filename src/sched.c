@@ -62,11 +62,8 @@ void *slick_threadentry (void *arg)
 	psched.sptr = tinf->sptr;
 	psched.sidx = tinf->thridx;
 
-#if 1
+#if 0
 fprintf (stderr, "slick_threadentry(): here!  my thread id is %p, index %d\n", (void *)pthread_self (), psched.sidx);
-#endif
-
-#if 1
 fprintf (stderr, "slick_threadentry(): enqueue initial process at %p, entry-point %p\n", tinf->initial_ws, tinf->initial_proc);
 #endif
 	if (tinf->initial_ws && tinf->initial_proc) {
