@@ -144,7 +144,7 @@ static void slick_schedule (psched_t *s)
 	__asm__ __volatile__ ("				\n" \
 		"	movq	%%rax, %%rbp		\n" \
 		"	movq	-8(%%rbp), %%rax	\n" \
-		"	movq	32(%%rcx), %%rsp	\n" \
+		"	movq	40(%%rcx), %%rsp	\n" \
 		"	jmp	*%%rax			\n" \
 		:: "a" (w), "c" (s) : "rbx", "rdx", "rdi", "rsi", "memory", "cc");
 	_exit (42);		/* assert: never get here (prevent gcc warning about returning non-return function) */

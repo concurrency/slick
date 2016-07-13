@@ -48,3 +48,5 @@ depcomp
 install-sh
 Makefile
 stamp-h1
+config.h
+config.h.in

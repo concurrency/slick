@@ -18,7 +18,7 @@
 
 
 extern int64_t ow_commstime;			/* bytes of workspace required */
-extern void (*o_commstime_startup)(void);	/* synthetic compiler-generated entry point */
+extern void o_commstime_startup (void);		/* synthetic compiler-generated entry point */
 
 
 int main (int argc, char **argv)
@@ -33,7 +33,7 @@ int main (int argc, char **argv)
 	ws = malloc (ow_commstime);
 	wstop = ws + (int)(ow_commstime - sizeof (uint64_t));
 	fprintf (stderr, "commstime: allocated %lu bytes workspace at %p (adjusted %p)\n", ow_commstime, ws, wstop);
-	fprintf (stderr, "commstime: entry-point is at %p\n", o_commstime_startup);
+	fprintf (stderr, "commstime: entry-point is at %p (0x%16.16lx)\n", o_commstime_startup, (uint64_t)o_commstime_startup);
 
 	slick_startup (wstop, o_commstime_startup);
 
