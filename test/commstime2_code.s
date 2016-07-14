@@ -407,9 +407,9 @@ o_consume:
 	movq	%rax, 24(%rbp)			/* int64 t0 */
 
 	/* print! */
-	movl	$.LC0, %edi
-	movl	8(%rbp), %esi			/* int64 v */
-	movl	24(%rbp), %edx			/* int64 t0 */
+	movq	$.LC0, %rdi
+	movq	8(%rbp), %rsi			/* int64 v */
+	movq	24(%rbp), %rdx			/* int64 t0 */
 	movl	$0, %eax			/* vector count */
 	call	printf
 

@@ -50,8 +50,8 @@ o_commstime_startup:
  *
  *	<<consume WS>>
  *	<<prefix WS>>
- *	<<delta WS>>
  *	<<succ WS>>
+ *	<<delta WS>>
  */
 
 .section .rodata
@@ -59,7 +59,7 @@ o_commstime_startup:
 
 .globl	ow_commstime
 ow_commstime:
-	.quad	576				/* bytes of workspace */
+	.quad	640				/* bytes of workspace (generous really) */
 
 .text
 
@@ -86,16 +86,16 @@ o_commstime:
 	movq	$o_commstime_p0, %rdx
 	call	os_startp
 
-	/* start PAR branch with 'delta' */
-	movq	%rbp, %rdi
-	leaq	-256(%rbp), %rsi
-	movq	$o_commstime_p1, %rdx
-	call	os_startp
-
 	/* start PAR branch with 'succ' */
 	movq	%rbp, %rdi
-	leaq	-384(%rbp), %rsi
+	leaq	-256(%rbp), %rsi
 	movq	$o_commstime_p2, %rdx
+	call	os_startp
+
+	/* start PAR branch with 'delta' */
+	movq	%rbp, %rdi
+	leaq	-384(%rbp), %rsi
+	movq	$o_commstime_p1, %rdx
 	call	os_startp
 
 	/* instance of 'consume' */
@@ -141,13 +141,13 @@ o_commstime_p0:					/* parallel process to run prefix */
 o_commstime_p1:					/* parallel process to run delta */
 
 	/* adjust for call */
-	subq	$40, %rbp			/* parent WS now at 256+40 = 296 */
+	subq	$40, %rbp			/* parent WS now at 384+40 = 424 */
 
-	leaq	344(%rbp), %rax			/* address of channel 'a' */
+	leaq	472(%rbp), %rax			/* address of channel 'a' */
 	movq	%rax, 8(%rbp)			/* param: in */
-	leaq	336(%rbp), %rax			/* address of channel 'b' */
+	leaq	464(%rbp), %rax			/* address of channel 'b' */
 	movq	%rax, 16(%rbp)			/* param: out0 */
-	leaq	328(%rbp), %rax			/* address of channel 'c' */
+	leaq	456(%rbp), %rax			/* address of channel 'c' */
 	movq	%rax, 24(%rbp)			/* param: out1 */
 	movq	$.L15, 0(%rbp)			/* return-address */
 	jmp	o_delta
@@ -163,11 +163,11 @@ o_commstime_p1:					/* parallel process to run delta */
 o_commstime_p2:					/* parallel process to run succ */
 
 	/* adjust for call */
-	subq	$32, %rbp			/* parent WS now at 384+32 = 416 */
+	subq	$32, %rbp			/* parent WS now at 256+32 = 288 */
 
-	leaq	456(%rbp), %rax			/* address of channel 'b' */
+	leaq	328(%rbp), %rax			/* address of channel 'b' */
 	movq	%rax, 8(%rbp)			/* param: in */
-	leaq	440(%rbp), %rax			/* address of channel 'd' */
+	leaq	312(%rbp), %rax			/* address of channel 'd' */
 	movq	%rax, 16(%rbp)			/* param: out */
 	movq	$.L16, 0(%rbp)			/* return-address */
 	jmp	o_succ
@@ -292,18 +292,28 @@ o_succ:
 /*
  *	delta workspace:
  *
- *	+40	param: out1
- *	+32	param: out0
- *	+24	param: in
- *	+16	return-addr			<-- entry Wptr
- *	+8	int64 y
- *	0	[temp]		// running Wptr
- *	-8	[iptr]
- *	-16	[link]
- *	-24	[priof]
- *	-32	[ptr]
+ *	+56	param: out1				|	[+72]
+ *	+48	param: out0							|	[+112]
+ *	+40	param: in
+ *	+32	return-addr		<-- entry Wptr
+ *	+24	int64 y					| 	[+40]		|	[+88]
+ *	+16	PAR-savedpri
+ *	+8	PAR-count
+ *	0	PAR-iptrsucc/joinlab	// run Wptr
+ *	-8	[iptr]					|	+8	succ-wptr (unused)
+ *	-16	[link]					| (-16)	0	[temp]
+ *	-24	[priof]					|	-8	[iptr]
+ *	-32	[ptr]					|	-16	[link]
+ *	-40						|	-24	[priof]
+ *	-48						|	-32	[ptr]
+ *	-56									| (-56)	+8	succ-wptr		<-- startp here
+ *	-64									|	0	[temp]
+ *	-72									|	-8	[iptr]
+ *	-80									|	-16	[link]
+ *	-88									|	-24	[priof]
+ *	-96									|	-32	[ptr]
  *
- *	size = 48 + 32 == 80
+ *	size = 64 + (2 * 48) == 160
  */
 
 .section .rodata
@@ -311,7 +321,7 @@ o_succ:
 
 .globl	ow_delta
 ow_delta:
-	.quad	80
+	.quad	160
 
 .text
 
@@ -319,30 +329,63 @@ ow_delta:
 .type	o_delta, @function
 
 o_delta:
-	subq	$16, %rbp
+	subq	$32, %rbp
 
 .L3:
 	movq	%rbp, %rdi
-	movq	24(%rbp), %rsi			/* param: in */
-	leaq	8(%rbp), %rdx			/* int64 y */
+	movq	40(%rbp), %rsi			/* param: in */
+	leaq	24(%rbp), %rdx			/* int64 y */
 	movl	$8, %ecx
 	call	os_chanin
 
+	# now we go parallel for the outputs
+	movq	$0, 16(%rbp)			/* saved priority; FIXME */
+	movq	$2, 8(%rbp)			/* PAR count */
+	movq	$.L31, 0(%rbp)			/* PAR join-lab */
+
+	/* start PAR branch with output to out0 */
 	movq	%rbp, %rdi
-	movq	32(%rbp), %rsi			/* param: out0 */
-	leaq	8(%rbp), %rdx			/* int64 y */
+	leaq	-56(%rbp), %rsi			/* right below us (testing packing) */
+	movq	$o_delta_p0, %rdx
+	call	os_startp
+
+	/* another output on out1 */
+	subq	$16, %rbp
+
+	movq	%rbp, %rdi
+	movq	72(%rbp), %rsi			/* param: out1 */
+	leaq	40(%rbp), %rdx			/* int64 y */
 	movl	$8, %ecx
 	call	os_chanout
 
+	/* we're the parallel process in the parent context */
+	addq	$16, %rbp
+
 	movq	%rbp, %rdi
-	movq	40(%rbp), %rsi			/* param: out1 */
-	leaq	8(%rbp), %rdx			/* int64 y */
+	movq	%rbp, %rsi
+	call	os_endp
+
+o_delta_p0:					/* parallel process with output to out0 */
+	subq	$8, %rbp
+
+	movq	%rbp, %rdi
+	movq	112(%rbp), %rsi			/* param: out0 */
+	leaq	88(%rbp), %rdx			/* int64 y */
 	movl	$8, %ecx
 	call	os_chanout
+
+	addq	$8, %rbp
+
+	movq	%rbp, %rdi
+	movq	0(%rbp), %rsi			/* startp left workspace address here, should be +56 */
+	call	os_endp
+
+
+.L31:						/* JOINLAB */
 
 	jmp	.L3				/* loop forever */
 
-	addq	$16, %rbp
+	addq	$32, %rbp
 	movq	0(%rbp), %r11
 	jmp	*%r11
 /*}}}*/
@@ -374,7 +417,7 @@ ow_consume:
 .LC0:
 	.string	"The value was %ld, nanosecs %lu\n"
 .LC1:
-	.string "Loop time %lu\n"
+	.string "Loop time: %lu\n"
 
 .text
 
@@ -420,7 +463,7 @@ o_consume:
 	movq	$.LC0, %rdi
 	movq	8(%rbp), %rsi			/* int64 v */
 	movq	24(%rbp), %rdx			/* int64 t0 */
-	shrq	$2, %rdx			/* /4 */
+	shrq	$2, %rdx			/* divide by 4 to get loop time */
 	movl	$0, %eax			/* vector count */
 	call	printf
 

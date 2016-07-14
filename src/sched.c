@@ -137,6 +137,9 @@ static void slick_schedule (psched_t *s)
 {
 	workspace_t w = dequeue (s);
 
+#if 0
+fprintf (stderr, "slick_schedule(): scheduling process at %p\n", w);
+#endif
 	/* and go! */
 	__asm__ __volatile__ ("				\n" \
 		"	movq	%%rax, %%rbp		\n" \
@@ -177,6 +180,9 @@ void os_shutdown (workspace_t w)
  */
 void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
 {
+#if 0
+fprintf (stderr, "os_chanin(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
+#endif
 	if (*chanptr == NULL) {
 		/* nothing here yet, place ourselves and deschedule */
 		w[LIPtr] = (uint64_t)__builtin_return_address (0);
@@ -231,6 +237,9 @@ void os_chanin64 (workspace_t w, void **chanptr, void *addr)
  */
 void os_chanout (workspace_t w, void **chanptr, const void *addr, const int count)
 {
+#if 0
+fprintf (stderr, "os_chanout(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
+#endif
 	if (*chanptr == NULL) {
 		/* nothing here yet, place ourselves and deschedule */
 		w[LIPtr] = (uint64_t)__builtin_return_address (0);
@@ -313,6 +322,9 @@ void os_stopp (workspace_t w)
  */
 void os_startp (workspace_t w, workspace_t other, void *entrypoint)
 {
+#if 0
+fprintf (stderr, "os_startp(): w=%p, other=%p, entrypoint=%p\n", w, other, entrypoint);
+#endif
 	other[LTemp] = (uint64_t)w;						/* parent workspace */
 	other[LIPtr] = (uint64_t)entrypoint;
 	other[LPriofinity] = 0;							/* FIXME */
@@ -334,6 +346,8 @@ void os_endp (workspace_t w, workspace_t other)
 
 		enqueue (other, &psched);
 	}
+	/* else we were not the last -- reschedule */
+	slick_schedule (&psched);
 }
 /*}}}*/
 /*{{{  uint64_t os_ldtimer (workspace_t w)*/
