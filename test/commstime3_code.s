@@ -463,6 +463,7 @@ o_consume:
 	movq	$.LC0, %rdi
 	movq	8(%rbp), %rsi			/* int64 v */
 	movq	24(%rbp), %rdx			/* int64 t0 */
+	addq	$3, %rdx			/* round up */
 	shrq	$2, %rdx			/* divide by 4 to get loop time */
 	movl	$0, %eax			/* vector count */
 	call	printf

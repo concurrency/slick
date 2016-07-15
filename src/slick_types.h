@@ -79,6 +79,9 @@ typedef struct TAG_psched_t {		/* scheduler structure */
 	slick_t *sptr;			/* pointer to global state */
 	int32_t sidx;			/* which particular RT thread we are */
 	int32_t dummy;
+
+	int32_t signal_in;		/* sleep/wake-up pipe FDs */
+	int32_t signal_out;
 } __attribute__ ((packed)) psched_t;
 
 typedef struct TAG_slickts_t {

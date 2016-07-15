@@ -39,6 +39,8 @@
 #include "slick_types.h"
 #include "sutil.h"
 
+// #define LOCAL_DEBUG
+
 static __thread psched_t psched;		/* per-thread scheduler structure */
 
 static void deadlock (void) __attribute__ ((noreturn));
@@ -56,16 +58,32 @@ extern void slick_schedlinkage (psched_t *s) __attribute__ ((noreturn));
 void *slick_threadentry (void *arg)
 {
 	slickts_t *tinf = (slickts_t *)arg;
+	int fds[2];
 
 	memset (&psched, 0, sizeof (psched_t));
 
 	psched.sptr = tinf->sptr;
 	psched.sidx = tinf->thridx;
 
-#if 0
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
 fprintf (stderr, "slick_threadentry(): here!  my thread id is %p, index %d\n", (void *)pthread_self (), psched.sidx);
 fprintf (stderr, "slick_threadentry(): enqueue initial process at %p, entry-point %p\n", tinf->initial_ws, tinf->initial_proc);
 #endif
+
+	/* create the pipe descriptors that we'll need for sleep/wakeup */
+	if (pipe (fds) < 0) {
+		slick_fatal ("failed to create signalling pipe for thread %d, [%s]", psched.sidx, strerror (errno));
+		return NULL;
+	}
+
+	psched.signal_in = (int32_t)fds[1];
+	psched.signal_out = (int32_t)fds[0];
+
+	if (fcntl (fds[1], F_SETFL, O_NONBLOCK) < 0) {
+		slick_fatal ("failed to set NONBLOCK option on pipe for thread %d, [%s]", psched.sidx, strerror (errno));
+		return NULL;
+	}
+
 	if (tinf->initial_ws && tinf->initial_proc) {
 		/* enqueue this process */
 		workspace_t iws = (workspace_t)tinf->initial_ws;
@@ -137,8 +155,8 @@ static void slick_schedule (psched_t *s)
 {
 	workspace_t w = dequeue (s);
 
-#if 0
-fprintf (stderr, "slick_schedule(): scheduling process at %p\n", w);
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
+	fprintf (stderr, "slick_schedule(): scheduling process at %p\n", w);
 #endif
 	/* and go! */
 	__asm__ __volatile__ ("				\n" \
@@ -180,8 +198,8 @@ void os_shutdown (workspace_t w)
  */
 void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
 {
-#if 0
-fprintf (stderr, "os_chanin(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
+	fprintf (stderr, "os_chanin(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
 #endif
 	if (*chanptr == NULL) {
 		/* nothing here yet, place ourselves and deschedule */
@@ -237,8 +255,8 @@ void os_chanin64 (workspace_t w, void **chanptr, void *addr)
  */
 void os_chanout (workspace_t w, void **chanptr, const void *addr, const int count)
 {
-#if 0
-fprintf (stderr, "os_chanout(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
+	fprintf (stderr, "os_chanout(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
 #endif
 	if (*chanptr == NULL) {
 		/* nothing here yet, place ourselves and deschedule */
@@ -322,8 +340,8 @@ void os_stopp (workspace_t w)
  */
 void os_startp (workspace_t w, workspace_t other, void *entrypoint)
 {
-#if 0
-fprintf (stderr, "os_startp(): w=%p, other=%p, entrypoint=%p\n", w, other, entrypoint);
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
+	fprintf (stderr, "os_startp(): w=%p, other=%p, entrypoint=%p\n", w, other, entrypoint);
 #endif
 	other[LTemp] = (uint64_t)w;						/* parent workspace */
 	other[LIPtr] = (uint64_t)entrypoint;

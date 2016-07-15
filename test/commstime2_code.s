@@ -366,6 +366,8 @@ ow_consume:
 
 .LC0:
 	.string	"The value was %ld, nanosecs %lu\n"
+.LC1:
+	.string "Loop time %lu\n"
 
 .text
 
@@ -398,10 +400,10 @@ o_consume:
 	call	os_ldtimer
 	movq	%rax, 16(%rbp)			/* int64 t1 */
 
-	/* t0 := (t1 - t0) / 40000000 */
+	/* t0 := (t1 - t0) / 10000000 */
 	movq	16(%rbp), %rax			/* int64 t1 */
 	subq	24(%rbp), %rax			/* -t0 */
-	movq	$40000000, %rcx
+	movq	$10000000, %rcx
 	movq	$0, %rdx
 	divq	%rcx				/* rdx:rax div by rcx -> rax=quot, rdx=rem */
 	movq	%rax, 24(%rbp)			/* int64 t0 */
@@ -410,6 +412,13 @@ o_consume:
 	movq	$.LC0, %rdi
 	movq	8(%rbp), %rsi			/* int64 v */
 	movq	24(%rbp), %rdx			/* int64 t0 */
+	addq	$3, %rdx			/* += 3 (round up) */
+	shrq	$2, %rdx			/* /4 */
+	movl	$0, %eax			/* vector count */
+	call	printf
+
+	movq	$.LC1, %rdi
+	movq	24(%rbp), %rsi			/* int64 t0 */
 	movl	$0, %eax			/* vector count */
 	call	printf
 

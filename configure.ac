@@ -46,10 +46,11 @@ AC_ARG_ENABLE([debug], AS_HELP_STRING([--enable-debug], [enable debugging messag
 AC_MSG_CHECKING(whether to enable debugging messages)
 AC_MSG_RESULT($enable_debug)
 if test "$enable_debug" = yes; then
- AC_DEFINE([DEBUG],1,[define to enable debugging messages from the scheduler])
+ AC_DEFINE([SLICK_DEBUG],1,[define to enable debugging messages from the scheduler])
 fi
 
 
+dnl Borrowed from CCSP/Carl.
 AC_MSG_CHECKING(support for thread-local-storage)
 AC_TRY_RUN([
   __thread int bar;
