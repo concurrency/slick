@@ -38,6 +38,7 @@
 
 #include "slick_types.h"
 #include "sutil.h"
+#include "atomics.h"
 
 // #define LOCAL_DEBUG
 
