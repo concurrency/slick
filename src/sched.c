@@ -199,28 +199,46 @@ void os_shutdown (workspace_t w)
  */
 void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
 {
+	uint64_t *chanval;
+	workspace_t other;
+	void *src;
+
 #if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
 	fprintf (stderr, "os_chanin(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
 #endif
-	if (*chanptr == NULL) {
-		/* nothing here yet, place ourselves and deschedule */
+
+	chanval = (uint64_t *)att64_val ((atomic64_t *)chanptr);
+
+	if (!chanval || ((uint64_t)chanval & 1)) {
+		/* not here, or ALTing -- prepare to sleep */
 		w[LIPtr] = (uint64_t)__builtin_return_address (0);
-		w[LPriofinity] = 0;
+		w[LPriofinity] = 0;						/* FIXME */
 		w[LPointer] = (uint64_t)addr;
 
-		*chanptr = (void *)w;
+		write_barrier ();
 
-		slick_schedule (&psched);
-	} else {
-		/* other here, copy and reschedule */
-		workspace_t other = (workspace_t)*chanptr;
-		const void *src = (const void *)other[LPointer];
-
-		memcpy (addr, src, count);
-		*chanptr = NULL;
-
-		enqueue (other, &psched);
+		chanval = (uint64_t *)att64_swap ((atomic64_t *)chanptr, (uint64_t)w);
+		if (!chanval) {
+			/* we're in the channel now */
+			slick_schedule (&psched);
+		} else if ((uint64_t)chanval & 1) {
+			/* something ALTy in the channel, but we're there now */
+			/* FIXME: trigger_alt_guard() */
+			slick_fatal ("Unimplemented :(");
+			slick_schedule (&psched);
+		}
+		/* else, something arrived in the channel along the way, so go with it */
 	}
+
+	other = (workspace_t)chanval;
+	src = (void *)other[LPointer];
+
+	memcpy (addr, src, count);
+	att64_set ((atomic64_t *)chanptr, (uint64_t)NULL);
+
+	write_barrier ();
+
+	enqueue (other, &psched);
 }
 /*}}}*/
 /*{{{  void os_chanin64 (workspace_t w, void **chanptr, void *addr)*/

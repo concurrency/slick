@@ -21,6 +21,8 @@
 /*
  * Based approximately on CCSP's i386/atomics.h (mostly Carl) with parts
  * of that based on include/asm-i386/spinlock.h in the Linux kernel.
+ *
+ * and some stuff from i386/asm_ops.h
  */
 
 #ifndef __ATOMICS_H
@@ -29,6 +31,12 @@
 #ifndef __GNUC__
 #error Need GNU C for this scheduler
 #endif
+
+
+#define memory_barrier() __asm__ __volatile__ ("mfence\n" : : : "memory");
+#define read_barrier() __asm__ __volatile__ ("lfence\n" : : : "memory");
+#define write_barrier() __asm__ __volatile__ ("sfence\n" : : : "memory");
+
 
 /* borrowed from Carl's inlining.h in CCSP */
 #define INLINE __attribute__((always_inline)) inline
@@ -79,10 +87,161 @@ static INLINE uint64_t att64_val (atomic64_t *atval) /*{{{*/
 	__asm__ __volatile__ ("				\n"
 			"	movq	%1, %0		\n"
 			: "=r" (result)
-			: "m" (__dummy_atomic32 (atval))
+			: "m" (__dummy_atomic64 (atval))
 			);
 
 	return result;
+}
+/*}}}*/
+
+static INLINE void att32_set (atomic32_t *atval, uint32_t value) /*{{{*/
+{
+	__asm__ __volatile__ ("				\n"
+			"	movl	%1, %0		\n"
+			: "=m" (__dummy_atomic32 (atval))
+			: "r" (value)
+			);
+}
+/*}}}*/
+static INLINE void att32_inc (atomic32_t *atval) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; addl	$1, %0		\n"
+			: "+m" (__dummy_atomic32 (atval))
+			: /* no inputs */
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att32_dec (atomic32_t *atval) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; subl	$1, %0		\n"
+			: "+m" (__dummy_atomic32 (atval))
+			: /* no inputs */
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE unsigned int att32_dec_z (atomic32_t *atval) /*{{{*/
+{
+	unsigned char result;
+
+	__asm__ __volatile__ ("					\n"
+			"	lock; subl	$1, %0		\n"
+			"	setz		%1		\n"
+			: "+m" (__dummy_atomic32 (atval)), "=q" (result)
+			: /* no inputs */
+			: "cc"
+			);
+	return (unsigned int)result;
+}
+/*}}}*/
+static INLINE void att32_add (atomic32_t *atval, uint32_t value) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; addl	%1, %0		\n"
+			: "+m" (__dummy_atomic32 (atval))
+			: "ir" (value)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att32_sub (atomic32_t *atval, uint32_t value) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; subl	%1, %0		\n"
+			: "+m" (__dummy_atomic32 (atval))
+			: "ir" (value)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE unsigned int att32_sub_z (atomic32_t *atval, uint32_t value) /*{{{*/
+{
+	unsigned char result;
+
+	__asm__ __volatile__ ("					\n"
+			"	lock; subl	%2, %0		\n"
+			"	setz		%1		\n"
+			: "+m" (__dummy_atomic32 (atval)), "=q" (result)
+			: "ir" (value)
+			: "cc"
+			);
+
+	return (unsigned int)result;
+}
+/*}}}*/
+static INLINE void att32_or (atomic32_t *atval, uint32_t bits) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; orl	%1, %0		\n"
+			: "+m" (__dummy_atomic32 (atval))
+			: "ir" (bits)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att32_and (atomic32_t *atval, uint32_t bits) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; andl	%1, %0		\n"
+			: "+m" (__dummy_atomic32 (atval))
+			: "ir" (bits)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE uint32_t att32_swap (atomic32_t *atval, uint32_t newval) /*{{{*/
+{
+
+	__asm__ __volatile__ ("				\n"
+			"	xchgl	%0, %1		\n"
+			: "=r" (newval), "+m" (__dummy_atomic32 (atval))
+			: "0" (newval)
+			: "memory"
+			);
+
+	return newval;
+}
+/*}}}*/
+static INLINE unsigned int att32_cas (atomic32_t *atval, uint32_t oldval, uint32_t newval) /*{{{*/
+{
+	unsigned int result;
+
+	__asm__ __volatile__ ("					\n"
+			"	lock; cmpxchgl	%3, %1		\n"
+			"	setz		%%al		\n"
+			"	andl		$1, %%eax	\n"
+			: "=a" (result), "+m" (__dummy_atomic32 (atval))
+			: "0" (oldval), "r" (newval)
+			: "cc", "memory"
+			);
+
+	return result;
+}
+/*}}}*/
+
+static INLINE void att64_set (atomic64_t *atval, uint64_t value) /*{{{*/
+{
+	__asm__ __volatile__ ("				\n"
+			"	movq	%1, %0		\n"
+			: "=m" (__dummy_atomic64 (atval))
+			: "r" (value)
+			);
+}
+/*}}}*/
+static INLINE uint64_t att64_swap (atomic64_t *atval, uint64_t newval) /*{{{*/
+{
+
+	__asm__ __volatile__ ("				\n"
+			"	xchgq	%0, %1		\n"
+			: "=r" (newval), "+m" (__dummy_atomic64 (atval))
+			: "0" (newval)
+			: "memory"
+			);
+
+	return newval;
 }
 /*}}}*/
 
