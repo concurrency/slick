@@ -38,6 +38,7 @@
 #include <pthread.h>
 
 #include "slick.h"
+#include "atomics.h"
 #include "slick_types.h"
 #include "sutil.h"
 
@@ -48,8 +49,12 @@ extern void *slick_threadentry (void *arg);
 /*}}}*/
 /*{{{  private data*/
 static slick_t slick;
-
 static slickts_t threadargs[MAX_RT_THREADS];
+
+/*}}}*/
+/*{{{  public data*/
+slick_ss_t slickss;
+
 
 /*}}}*/
 
@@ -64,6 +69,7 @@ int slick_init (const char **argv, const int argc)
 	char *ch;
 
 	memset (&slick, 0, sizeof (slick_t));
+	memset (&slickss, 0, sizeof (slick_ss_t));
 
 	if (argc == 0) {
 		/*{{{  create some default arguments (incase anyone dereferences argv[0] assumingly) */
@@ -258,6 +264,11 @@ skip_cpuinfo:
 		slick_message ("going to use %d run-time threads", slick.rt_nthreads);
 	}
 
+	/* initialise some fields in here */
+	slickss.verbose = slick.verbose;
+	att32_init (&(slickss.nactive), (uint32_t)slick.rt_nthreads);
+	att32_init (&(slickss.nwaiting), 0);
+
 	return 0;
 }
 /*}}}*/
@@ -270,12 +281,18 @@ void slick_startup (void *ws, void (*proc)(void))
 {
 	int i;
 
-	threadargs[0].thridx = 0;
-	threadargs[0].sptr = &slick;
+	for (i=0; i<slick.rt_nthreads; i++) {
+		threadargs[i].thridx = i;
+		threadargs[i].sptr = &slick;
+		threadargs[i].initial_ws = NULL;
+		threadargs[i].initial_proc = NULL;
+	}
+
 	threadargs[0].initial_ws = ws;
 	threadargs[0].initial_proc = proc;
 
-	for (i=0; i<1; i++) {
+	// slick.rt_nthreads
+	for (i=0; i<slick.rt_nthreads; i++) {
 		pthread_attr_init (&slick.rt_threadattr[i]);
 
 		if (pthread_create (&slick.rt_threadid[i], &slick.rt_threadattr[i], slick_threadentry, &threadargs[i])) {
@@ -284,10 +301,11 @@ void slick_startup (void *ws, void (*proc)(void))
 	}
 
 #if 1
-slick_message ("slick_startup(): here, having created at least 1 thread.. :)");
+slick_message ("slick_startup(): here, having created %d threads.. :)", slick.rt_nthreads);
 #endif
 
-	for (i=0; i<1; i++) {
+	// slick.rt_nthreads
+	for (i=0; i<slick.rt_nthreads; i++) {
 		void *result;
 
 		pthread_join (slick.rt_threadid[i], &result);

@@ -36,12 +36,14 @@
 #include <sched.h>
 #include <pthread.h>
 
-#include "slick_types.h"
-#include "sutil.h"
 #include "atomics.h"
+#include "slick_types.h"
+#include "slick_priv.h"
+#include "sutil.h"
 
 // #define LOCAL_DEBUG
 
+static __thread pbatch_t dflbatch;		/* default batch */
 static __thread psched_t psched;		/* per-thread scheduler structure */
 
 static void deadlock (void) __attribute__ ((noreturn));
@@ -65,6 +67,16 @@ void *slick_threadentry (void *arg)
 
 	psched.sptr = tinf->sptr;
 	psched.sidx = tinf->thridx;
+
+	att32_init (&(psched.sync), 0);
+
+	dflbatch.nb = NULL;
+	dflbatch.fptr = NULL;
+	dflbatch.bptr = NULL;
+	dflbatch.priority = 0;
+	CPU_ZERO (&dflbatch.cpuset);
+
+	psched.cbch = &dflbatch;
 
 #if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
 fprintf (stderr, "slick_threadentry(): here!  my thread id is %p, index %d\n", (void *)pthread_self (), psched.sidx);
@@ -99,6 +111,31 @@ fprintf (stderr, "slick_threadentry(): enqueue initial process at %p, entry-poin
 	return NULL;
 }
 /*}}}*/
+/*{{{  static void slick_safe_pause (void)*/
+/*
+ *	puts a run-time thread to sleep
+ */
+static void slick_safe_pause (void)
+{
+	uint32_t buffer, sync;
+
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
+fprintf (stderr, "slick_safe_pause(): thread index %d\n", psched.sidx);
+#endif
+	while (!(sync = att32_swap (&(psched.sync), 0))) {
+		serialise ();
+		read (psched.signal_out, &buffer, 1);
+		serialise ();
+	}
+
+	att32_or (&(psched.sync), sync);		/* put back the flags */
+
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
+fprintf (stderr, "slick_safe_pause(): thread index %d about to resume after pause\n", psched.sidx);
+#endif
+}
+/*}}}*/
+
 
 
 /*{{{  static void deadlock (void)*/
@@ -135,8 +172,34 @@ static workspace_t dequeue (psched_t *s)
 {
 	workspace_t tmp = s->fptr;
 
+retry_dequeue:
 	if (tmp == NULL) {
-		deadlock ();
+		/* ran out of processes, or nothing here to start with -- maybe goto sleep, if last: deadlock */
+		uint32_t waiting;
+
+		if (att32_dec_z (&(slickss.nactive))) {
+			/* we were the last one */
+			waiting = att32_val (&(slickss.nwaiting));
+
+			read_barrier ();
+			if (!waiting) {
+				uint32_t active = att32_val (&(slickss.nactive));
+
+				if (!active) {
+					/* none active, none waiting: we're deadlocked */
+					deadlock ();
+				}	/* else something probably waiting woke up, active again -- we sleep */
+			}
+		}
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
+		fprintf (stderr, "dequeue(): thread index %d going to sleep\n", s->sidx);
+#endif
+		slick_safe_pause ();
+		att32_inc (&(slickss.nactive));		/* we're awake again */
+
+		/* FIXME: might need to scoop up work from somewhere */
+		tmp = s->fptr;
+		goto retry_dequeue;
 	} else if (tmp == s->bptr) {
 		/* last one */
 		s->fptr = NULL;
@@ -163,7 +226,7 @@ static void slick_schedule (psched_t *s)
 	__asm__ __volatile__ ("				\n" \
 		"	movq	%%rax, %%rbp		\n" \
 		"	movq	-8(%%rbp), %%rax	\n" \
-		"	movq	40(%%rcx), %%rsp	\n" \
+		"	movq	48(%%rcx), %%rsp	\n" \
 		"	jmp	*%%rax			\n" \
 		:: "a" (w), "c" (s) : "rbx", "rdx", "rdi", "rsi", "memory", "cc");
 	_exit (42);		/* assert: never get here (prevent gcc warning about returning non-return function) */
@@ -177,7 +240,9 @@ static void slick_schedule (psched_t *s)
  */
 void os_entry (void)
 {
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
 	slick_message ("scheduler entry for thread %d, saved SP is %p", psched.sidx, psched.saved_sp);
+#endif
 
 	slick_schedule (&psched);
 }
@@ -193,25 +258,32 @@ void os_shutdown (workspace_t w)
 	pthread_exit (NULL);
 }
 /*}}}*/
-/*{{{  void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)*/
+/*{{{  channel flags (integer)*/
+#define CIO_NONE	(0x00000000)
+#define CIO_INPUT	(0x00000001)
+#define CIO_OUTPUT	(0x00000002)
+
+/*}}}*/
+/*{{{  */
 /*
- *	channel input
+ *	channel communication -- both ways.  This gets inlined and, hopefully, gcc optimises away everything
+ *	that isn't used or can't be determined statically.
  */
-void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
+static INLINE void channel_io (const int flags, workspace_t w, void **chanptr, void *addr, const int count, uint64_t raddr)
 {
 	uint64_t *chanval;
 	workspace_t other;
-	void *src;
+	void *optr;
 
 #if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
-	fprintf (stderr, "os_chanin(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
+	fprintf (stderr, "channel_io(): flags=0x%8.8x, w=%p, chanptr=%p, addr=%p, raddr=%p, count=%d\n", flags, w, chanptr, addr, raddr, count);
 #endif
 
 	chanval = (uint64_t *)att64_val ((atomic64_t *)chanptr);
 
 	if (!chanval || ((uint64_t)chanval & 1)) {
 		/* not here, or ALTing -- prepare to sleep */
-		w[LIPtr] = (uint64_t)__builtin_return_address (0);
+		w[LIPtr] = raddr;
 		w[LPriofinity] = 0;						/* FIXME */
 		w[LPointer] = (uint64_t)addr;
 
@@ -231,14 +303,46 @@ void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
 	}
 
 	other = (workspace_t)chanval;
-	src = (void *)other[LPointer];
+	optr = (void *)other[LPointer];
 
-	memcpy (addr, src, count);
-	att64_set ((atomic64_t *)chanptr, (uint64_t)NULL);
+	if (flags & CIO_INPUT) {
+		switch (count) {
+		case 0:							break;			/* a signalling mechanism */
+		case 1:	*(uint8_t *)(addr) = *(uint8_t *)(optr);	break;
+		case 2:	*(uint16_t *)(addr) = *(uint16_t *)(optr);	break;
+		case 4:	*(uint32_t *)(addr) = *(uint32_t *)(optr);	break;
+		case 8:	*(uint64_t *)(addr) = *(uint64_t *)(optr);	break;
+		default:
+			memcpy (addr, optr, count);
+			break;
+		}
+	} else {
+		switch (count) {
+		case 0:							break;			/* a signalling mechanism */
+		case 1:	*(uint8_t *)(optr) = *(uint8_t *)(addr);	break;
+		case 2:	*(uint16_t *)(optr) = *(uint16_t *)(addr);	break;
+		case 4:	*(uint32_t *)(optr) = *(uint32_t *)(addr);	break;
+		case 8:	*(uint64_t *)(optr) = *(uint64_t *)(addr);	break;
+		default:
+			memcpy (optr, addr, count);
+			break;
+		}
+	}
 
+	*chanptr = NULL;			/* write barrier will make sure this goes first */
+	// att64_set ((atomic64_t *)chanptr, (uint64_t)NULL);
 	write_barrier ();
-
 	enqueue (other, &psched);
+	return;
+}
+/*}}}*/
+/*{{{  void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)*/
+/*
+ *	channel input
+ */
+void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
+{
+	channel_io (CIO_INPUT, w, chanptr, addr, count, (uint64_t)__builtin_return_address (0));
 }
 /*}}}*/
 /*{{{  void os_chanin64 (workspace_t w, void **chanptr, void *addr)*/
@@ -247,58 +351,16 @@ void os_chanin (workspace_t w, void **chanptr, void *addr, const int count)
  */
 void os_chanin64 (workspace_t w, void **chanptr, void *addr)
 {
-	if (*chanptr == NULL) {
-		/* nothing here yet, place ourselves and deschedule */
-		w[LIPtr] = (uint64_t)__builtin_return_address (0);
-		w[LPriofinity] = 0;
-		w[LPointer] = (uint64_t)addr;
-
-		*chanptr = (void *)w;
-
-		slick_schedule (&psched);
-	} else {
-		/* other here, copy and reschedule */
-		workspace_t other = (workspace_t)*chanptr;
-		const void *src = (const void *)other[LPointer];
-
-		*(uint64_t *)addr = *(uint64_t *)src;
-		*chanptr = NULL;
-
-		enqueue (other, &psched);
-	}
+	channel_io (CIO_INPUT, w, chanptr, addr, 8, (uint64_t)__builtin_return_address (0));
 }
 /*}}}*/
 /*{{{  void os_chanout (workspace_t w, void **chanptr, const void *addr, const int count)*/
 /*
  *	channel output
  */
-void os_chanout (workspace_t w, void **chanptr, const void *addr, const int count)
+void os_chanout (workspace_t w, void **chanptr, void *addr, const int count)
 {
-#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
-	fprintf (stderr, "os_chanout(): w=%p, chanptr=%p, addr=%p, count=%d\n", w, chanptr, addr, count);
-#endif
-	if (*chanptr == NULL) {
-		/* nothing here yet, place ourselves and deschedule */
-		w[LIPtr] = (uint64_t)__builtin_return_address (0);
-		w[LPriofinity] = 0;						/* FIXME */
-		w[LPointer] = (uint64_t)addr;
-
-		*chanptr = (void *)w;
-
-		slick_schedule (&psched);
-	} else if (((uint64_t)(*chanptr) & 0x0001000000000000) != 0) {
-		/* testing overhead of this */
-		slick_fatal ("impossible thing in os_chanout()");
-	} else {
-		/* other here, copy and reschedule */
-		workspace_t other = (workspace_t)*chanptr;
-		void *dst = (void *)other[LPointer];
-
-		memcpy (dst, addr, count);
-		*chanptr = NULL;
-
-		enqueue (other, &psched);
-	}
+	channel_io (CIO_OUTPUT, w, chanptr, addr, count, (uint64_t)__builtin_return_address (0));
 }
 /*}}}*/
 /*{{{  void os_chanoutv64 (workspace_t w, void **chanptr, const uint64_t val)*/
@@ -307,29 +369,33 @@ void os_chanout (workspace_t w, void **chanptr, const void *addr, const int coun
  */
 void os_chanoutv64 (workspace_t w, void **chanptr, const uint64_t val)
 {
-	if (*chanptr == NULL) {
-		/* nothing here yet, place ourselves and deschedule */
-		w[LIPtr] = (uint64_t)__builtin_return_address (0);
-		w[LPriofinity] = 0;						/* FIXME */
+	uint64_t *chanval;
+	workspace_t other;
+	void *dptr;
+
+#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
+	fprintf (stderr, "os_chanoutv64(): w=%p, chanptr=%p, val=%16.16lx\n", w, chanptr, val);
+#endif
+
+	chanval = (uint64_t *)att64_val ((atomic64_t *)chanptr);
+
+	/* if nothing here, or ALTy, save value and go to channel code */
+	if (!chanval || ((uint64_t)chanval & 1)) {
 		w[LTemp] = val;
-		w[LPointer] = (uint64_t)(&w[LTemp]);
-
-		*chanptr = (void *)w;
-
-		slick_schedule (&psched);
-	} else if (((uint64_t)(*chanptr) & 0x0001000000000000) != 0) {
-		/* testing overhead of this */
-		slick_fatal ("impossible thing in os_chanoutv64()");
-	} else {
-		/* other here, copy and reschedule */
-		workspace_t other = (workspace_t)*chanptr;
-		void *dst = (void *)other[LPointer];
-
-		*(uint64_t *)dst = val;
-		*chanptr = NULL;
-
-		enqueue (other, &psched);
+		channel_io (CIO_OUTPUT, w, chanptr, (void *)w, 8, (uint64_t)__builtin_return_address (0));
+		/* if we get this far, we raced with the input, but done now */
+		return;
 	}
+
+	/* channel has a process in it, and it's not ALTing, so not going anywhere */
+	other = (workspace_t)chanval;
+	dptr = (void *)other[LPointer];
+
+	*(uint64_t *)dptr = val;
+	*chanptr = NULL;
+
+	write_barrier ();
+	enqueue (other, &psched);
 }
 /*}}}*/
 /*{{{  void os_runp (workspace_t w, workspace_t other)*/

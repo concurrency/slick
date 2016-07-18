@@ -32,14 +32,21 @@
 #error Need GNU C for this scheduler
 #endif
 
+/* borrowed from Carl's inlining.h in CCSP */
+#define INLINE __attribute__((always_inline)) inline
+
 
 #define memory_barrier() __asm__ __volatile__ ("mfence\n" : : : "memory");
 #define read_barrier() __asm__ __volatile__ ("lfence\n" : : : "memory");
 #define write_barrier() __asm__ __volatile__ ("sfence\n" : : : "memory");
 
-
-/* borrowed from Carl's inlining.h in CCSP */
-#define INLINE __attribute__((always_inline)) inline
+/* serialise -- strongest barrier */
+static INLINE void serialise (void) {
+	__asm__ __volatile__ ("				\n"
+			"	movl	$0, %%eax	\n"
+			"	cpuid			\n"
+			: : : "cc", "memory", "rax", "rbx", "rcx", "rdx");
+}
 
 
 typedef struct TAG_atomic32_t {

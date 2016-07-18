@@ -49,16 +49,22 @@ typedef struct TAG_slick_t {
 
 	pthread_t rt_threadid[MAX_RT_THREADS];		/* thread ID for each run-time thread */
 	pthread_attr_t rt_threadattr[MAX_RT_THREADS];	/* thread attributes for each run-time thread */
-	cpu_set_t rt_threadaff[MAX_RT_THREADS];		/* CPU affinity for each run-time thread */
+
 } slick_t;
+
+typedef struct TAG_slick_ss_t {
+	atomic32_t nactive;		/* number of active threads */
+	atomic32_t nwaiting;		/* number waiting for something (timeout, etc.) */
+	int32_t verbose;
+} slick_ss_t;
 
 
 typedef struct TAG_pbatch_t {		/* batch of processes */
 	struct TAG_pbatch_t *nb;	/* next batch */
 	workspace_t fptr;
 	workspace_t bptr;
-	/* FIXME: more things here */
-	uint64_t dummy[5];		/* pack out to 64 bytes */
+	uint64_t priority;
+	cpu_set_t cpuset;		/* 128 bytes mostly */
 } __attribute__ ((packed)) pbatch_t;
 
 typedef struct TAG_psched_t {		/* scheduler structure */
@@ -67,10 +73,11 @@ typedef struct TAG_psched_t {		/* scheduler structure */
 
 	workspace_t tptr;		/* timer-queue for this scheduler */
 
+	pbatch_t *cbch;			/* current batch (also priofinity) */
 	pbatch_t *fbch;			/* batch queue */
 	pbatch_t *bbch;
 
-	/* offset +40 */
+	/* offset +48 */
 	void *saved_sp;			/* saved C state */
 	void *saved_bp;
 	void *saved_r10;
@@ -78,10 +85,13 @@ typedef struct TAG_psched_t {		/* scheduler structure */
 
 	slick_t *sptr;			/* pointer to global state */
 	int32_t sidx;			/* which particular RT thread we are */
-	int32_t dummy;
+	int32_t dummy0;
 
 	int32_t signal_in;		/* sleep/wake-up pipe FDs */
 	int32_t signal_out;
+
+	atomic32_t sync;
+	int32_t dummy1;
 } __attribute__ ((packed)) psched_t;
 
 typedef struct TAG_slickts_t {

@@ -1,5 +1,5 @@
 /*
- *	slickasm.s -- bits and pieces of assembly for the scheduler
+ *	slick_priv.h -- definitions for some parts of the scheduler
  *	Copyright (C) 2016 Fred Barnes, University of Kent <frmb@kent.ac.uk>
  *
  *	This library is free software; you can redistribute it and/or
@@ -18,20 +18,12 @@
  *	MA  02110-1301 USA
  */
 
+#ifndef __SLICK_PRIV_H
+#define __SLICK_PRIV_H
 
-.text
+/* global scheduler structure */
+extern slick_ss_t slickss;
 
-.globl	slick_schedlinkage
-.type	slick_schedlinkage, @function
 
-slick_schedlinkage:
-	movq	%rdi, %rax			/* address of psched_t structure for this scheduler (thread-local) */
-
-	movq	%rsp, 48(%rax)			/* save registers */
-	movq	%rbp, 56(%rax)
-	movq	%r10, 64(%rax)
-	movq	%r11, 72(%rax)
-
-	call	os_entry
-
+#endif	/* !__SLICK_PRIV_H */
 
