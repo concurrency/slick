@@ -251,6 +251,22 @@ static INLINE uint64_t att64_swap (atomic64_t *atval, uint64_t newval) /*{{{*/
 	return newval;
 }
 /*}}}*/
+static INLINE unsigned int att64_cas (atomic64_t *atval, uint64_t oldval, uint64_t newval) /*{{{*/
+{
+	unsigned int result;
+
+	__asm__ __volatile__ ("					\n"
+			"	lock; cmpxchgq	%3, %1		\n"
+			"	setz		%%al		\n"
+			"	andl		$1, %%eax	\n"
+			: "=a" (result), "+m" (__dummy_atomic64 (atval))
+			: "0" (oldval), "r" (newval)
+			: "cc", "memory"
+			);
+
+	return result;
+}
+/*}}}*/
 
 
 #endif	/* !__ATOMICS_H */

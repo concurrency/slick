@@ -36,8 +36,22 @@ typedef uint64_t *workspace_t;		/* pointer to process workspace */
 #define LLink		-2		/* link field */
 #define LPriofinity	-3		/* priority/affinity */
 #define LPointer	-4		/* pointer for I/O */
-#define LTState		-5		/* timeout state field */
+#define LState		-4		/* ALTer state */
+#define LTLink		-5		/* timer-queue link */
 #define LTimef		-6		/* timeout time */
+
+
+#define ALT_ENABLING_BIT	30
+#define ALT_ENABLING		(1 << ALT_ENABLING_BIT)
+#define ALT_WAITING_BIT		29
+#define ALT_WAITING		(1 << ALT_WAITING_BIT)
+#define ALT_NOT_READY_BIT	28
+#define ALT_NOT_READY		(1 << ALT_NOT_READY_BIT)
+#define ALT_GUARDS		0x0000000000ffffff
+
+#define TimeSet_p		0x0001000000000000
+#define TimeNotSet_p		0x0002000000000000
+#define NoneSelected_o		0x0004000000000000
 
 
 typedef struct TAG_slick_t {

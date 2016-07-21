@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <errno.h>
+#include <signal.h>
 
 #include <sched.h>
 #include <pthread.h>
@@ -57,6 +58,40 @@ slick_ss_t slickss;
 
 
 /*}}}*/
+
+
+/*{{{  static void slick_sigalrm (int sig)*/
+/*
+ *	SIGALRM signal handler -- when the timer goes off
+ */
+static void slick_sigalrm (int sig)
+{
+	/* FIXME! */
+}
+/*}}}*/
+/*{{{  static void slick_sig_fatal (int sig)*/
+/*
+ *	signal handler for various fatal signals
+ */
+static void slick_sig_fatal (int sig)
+{
+	if (sig == SIGSEGV) {
+		slick_fatal ("Segmentation fault.");
+	} else {
+		slick_fatal ("Range error / STOP executed (signal %d)", sig);
+	}
+}
+/*}}}*/
+/*{{{  static void slick_sigfpe (int sig)*/
+/*
+ *	SIGFPE signal handler -- when we get a floating-point exception
+ */
+static void slick_sigfpe (int sig)
+{
+	slick_fatal ("Floating-point exception.");
+}
+/*}}}*/
+
 
 
 /*{{{  int slick_init (const char **argv, const int argc)*/
@@ -280,6 +315,13 @@ skip_cpuinfo:
 void slick_startup (void *ws, void (*proc)(void))
 {
 	int i;
+
+	/* sort out signal handling */
+	signal (SIGALRM, slick_sigalrm);
+	signal (SIGCHLD, SIG_IGN);		/* ignore exiting child threads */
+	signal (SIGILL, slick_sig_fatal);
+	signal (SIGBUS, slick_sig_fatal);
+	signal (SIGFPE, slick_sigfpe);
 
 	for (i=0; i<slick.rt_nthreads; i++) {
 		threadargs[i].thridx = i;

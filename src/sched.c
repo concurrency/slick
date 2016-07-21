@@ -264,7 +264,26 @@ void os_shutdown (workspace_t w)
 #define CIO_OUTPUT	(0x00000002)
 
 /*}}}*/
-/*{{{  */
+/*{{{  static INLINE void trigger_alt_guard (uint64_t val)*/
+/*
+ *	called when we're doing channel I/O and we find something ALTy in there
+ */
+static INLINE void trigger_alt_guard (uint64_t val)
+{
+	workspace_t other = (workspace_t)(val & ~1);
+	uint64_t state, nstate;
+
+	do {
+		state = att64_val ((atomic64_t *)&(other[LState]));
+		nstate = (state - 1) & (~(ALT_NOT_READY | ALT_WAITING));		/* decrement guard count */
+	} while (!att64_cas ((atomic64_t *)&(other[LState]), state, nstate));
+
+	if ((state & ALT_WAITING) || (nstate == 0)) {
+		enqueue (other, &psched);
+	}
+}
+/*}}}*/
+/*{{{  static INLINE void channel_io (const int flags, workspace_t w, void **chanptr, void *addr, const int count, uint64_t raddr)*/
 /*
  *	channel communication -- both ways.  This gets inlined and, hopefully, gcc optimises away everything
  *	that isn't used or can't be determined statically.
@@ -284,7 +303,7 @@ static INLINE void channel_io (const int flags, workspace_t w, void **chanptr, v
 	if (!chanval || ((uint64_t)chanval & 1)) {
 		/* not here, or ALTing -- prepare to sleep */
 		w[LIPtr] = raddr;
-		w[LPriofinity] = 0;						/* FIXME */
+		w[LPriofinity] = (uint64_t)psched.cbch;
 		w[LPointer] = (uint64_t)addr;
 
 		write_barrier ();
@@ -295,8 +314,7 @@ static INLINE void channel_io (const int flags, workspace_t w, void **chanptr, v
 			slick_schedule (&psched);
 		} else if ((uint64_t)chanval & 1) {
 			/* something ALTy in the channel, but we're there now */
-			/* FIXME: trigger_alt_guard() */
-			slick_fatal ("Unimplemented :(");
+			trigger_alt_guard ((uint64_t)chanval);
 			slick_schedule (&psched);
 		}
 		/* else, something arrived in the channel along the way, so go with it */
@@ -414,7 +432,7 @@ void os_runp (workspace_t w, workspace_t other)
 void os_stopp (workspace_t w)
 {
 	w[LIPtr] = (uint64_t)__builtin_return_address (0);
-	w[LPriofinity] = 0;							/* FIXME */
+	w[LPriofinity] = (uint64_t)psched.cbch;
 
 	slick_schedule (&psched);
 }
@@ -430,7 +448,7 @@ void os_startp (workspace_t w, workspace_t other, void *entrypoint)
 #endif
 	other[LTemp] = (uint64_t)w;						/* parent workspace */
 	other[LIPtr] = (uint64_t)entrypoint;
-	other[LPriofinity] = 0;							/* FIXME */
+	other[LPriofinity] = (uint64_t)psched.cbch;
 
 	enqueue (other, &psched);
 }
@@ -466,6 +484,29 @@ uint64_t os_ldtimer (workspace_t w)
 		return 0;
 	}
 	return (((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec);
+}
+/*}}}*/
+/*{{{  void os_alt (workspace_t w)*/
+/*
+ *	alternative start
+ */
+void os_alt (workspace_t w)
+{
+	att64_set ((atomic64_t *)&(w[LState]), ALT_ENABLING | ALT_NOT_READY | 1);
+	write_barrier ();
+	return;
+}
+/*}}}*/
+/*{{{  void os_talt (workspace_t w)*/
+/*
+ *	time(out) alternative start
+ */
+void os_talt (workspace_t w)
+{
+	att64_set ((atomic64_t *)&(w[LState]), ALT_ENABLING | ALT_NOT_READY | 1);
+	att64_set ((atomic64_t *)&(w[LTLink]), TimeNotSet_p);
+	write_barrier ();
+	return;
 }
 /*}}}*/
 
