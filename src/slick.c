@@ -304,6 +304,10 @@ skip_cpuinfo:
 	att32_init (&(slickss.nactive), (uint32_t)slick.rt_nthreads);
 	att32_init (&(slickss.nwaiting), 0);
 
+	bis128_init (&(slickss.enabled_threads), 0);
+	bis128_init (&(slickss.idle_threads), 0);
+	bis128_init (&(slickss.sleeping_threads), 0);
+
 	return 0;
 }
 /*}}}*/

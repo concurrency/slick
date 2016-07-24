@@ -1,6 +1,5 @@
-
 /*
- *	test stuff for x86-64 scheduler -- commstime
+ *	test stuff for x86-64 scheduler -- process ring
  */
 
 /*
@@ -10,176 +9,123 @@
 
 .text
 
+.globl	o_procring_shutdown
+.type	o_procring_shutdown, @function
 
-.globl	o_commstime_shutdown
-.type	o_commstime_shutdown, @function
-
-o_commstime_shutdown:
+o_procring_shutdown:
 	movq	%rbp, %rdi
 	call	os_shutdown
 	ret
 
-.globl	o_commstime_startup
-.type	o_commstime_startup, @function
 
-o_commstime_startup:
-	leaq	o_commstime_shutdown(%rip), %rax
+.globl	o_procring_startup
+.type	o_procring_startup, @function
+
+o_procring_startup:
+	leaq	o_procring_shutdown(%rip), %rax
 	movq	%rax, 0(%rbp)			/* save return-address */
-	jmp	o_commstime
+	jmp	o_procring
 
+#define NPROCS 128
 
+#define WSADJ	(64+((NPROCS+1) * 8))
+#define OFFS_A	(56+((NPROCS+1) * 8))
+#define OFFS_B	(48+((NPROCS+1) * 8))
+#define OFFS_D	(40+((NPROCS+1) * 8))
 
 /*
- *	commstime workspace:
+ *	procring workspace:
  *
  *	[no params]
- *	+56	return-addr		<-- call entry Wptr
- *	+48	channel a	// local var start
- *	+40	channel b
- *	+32	channel c
- *	+24	channel d
+ *	+64+X	return-addr		<-- call entry Wptr
+ *	+56+X	channel a		// local var start
+ *	+48+X	channel b
+ *	+40+X	channel d
+ *	+40	channel c[0..NPROCS]	// size == ((NPROCS+1) * sizeof(channel))
+ *	+32	REPL-i
+ *	+24	REPL-count
  *	+16	PAR-savedpri
  *	+8	PAR-count
- *	0	PAR-iptrsucc/joinlab		// running Wptr
+ *	0	PAR-iptrsucc/joinlab	// running Wptr
  *	-8	[iptr]
  *	-16	[link]
  *	-24	[priof]
  *	-32	[ptr]
  *
- *	size = 88 + 8 == 96
+ *	size = 96+X + 8 = 104+((NPROCS+1) * 8)
  *
  *	<<consume WS>>
  *	<<prefix WS>>
  *	<<delta WS>>
  *	<<succ WS>>
+ *	[NPROCS * <<id WS>>]
+ */
+
+.section rodata
+.align 8
+.globl	ow_procring
+ow_procring:	.quad	-1
+.text
+.globl	o_procring
+.type	o_procring, @function
+
+o_procring:
+	subq	$WSADJ, %rbp
+
+
+.L12:					/* join lab here */
+	addq	$WSADJ, %rbp
+	movq	0(%rbp), %r11
+	jmp	*%r11
+	
+
+/*{{{  o_id*/
+/*
+ *	id workspace:
+ *
+ *	+24	param: out
+ *	+16	param: in
+ *	+8	return-addr			<-- entry Wptr
+ *	0	[temp]		// running Wptr
+ *	-8	[iptr]
+ *	-16	[link]
+ *	-24	[priof]
+ *	-32	[ptr]
+ *
+ *	size = 40 + 24 == 64
  */
 
 .section .rodata
 .align 8
-
-.globl	ow_commstime
-ow_commstime:
-	.quad	576				/* bytes of workspace */
-
+.globl ow_id
+ow_id:	.quad	72				/* bytes of workspace */
 .text
+.globl	o_id
+.type	o_id, @function
 
-.globl	o_commstime
-.type	o_commstime, @function
+o_id:
+	subq	$8, %rbp
 
-	/* XXX: we expect the caller to have pre-set the return-address (part of the call) */
-o_commstime:
-	subq	$56, %rbp
-
-	movq	$0, 24(%rbp)			/* initialise channel d */
-	movq	$0, 32(%rbp)			/* initialise channel c */
-	movq	$0, 40(%rbp)			/* initialise channel b */
-	movq	$0, 48(%rbp)			/* initialise channel a */
-
-	/* setup for PAR */
-	movq	$0, 16(%rbp)			/* saved priority; FIXME */
-	movq	$4, 8(%rbp)			/* PAR count */
-	movq	$.L10, 0(%rbp)			/* PAR join-lab */
-
-	/* start PAR branch with 'prefix' */
+.L11:
 	movq	%rbp, %rdi
-	leaq	-128(%rbp), %rsi
-	movq	$o_commstime_p0, %rdx
-	call	os_startp
+	movq	16(%rbp), %rsi			/* param: in */
+	leaq	0(%rbp), %rdx
+	movl	$8, %ecx
+	call	os_chanin
 
-	/* start PAR branch with 'delta' */
 	movq	%rbp, %rdi
-	leaq	-256(%rbp), %rsi
-	movq	$o_commstime_p1, %rdx
-	call	os_startp
+	movq	24(%rbp), %rsi			/* param: out */
+	leaq	0(%rbp), %rdx
+	movl	$8, %ecx
+	call	os_chanout
 
-	/* start PAR branch with 'succ' */
-	movq	%rbp, %rdi
-	leaq	-384(%rbp), %rsi
-	movq	$o_commstime_p2, %rdx
-	call	os_startp
+	jmp	.L11
 
-	/* instance of 'consume' */
-	subq	$16, %rbp
-	leaq	48(%rbp), %rax			/* address of channel 'c' */
-	movq	%rax, 8(%rbp)			/* param: in */
-	movq	$.L12, 0(%rbp)			/* return-address */
-	jmp	o_consume
-.L12:
-	addq	$16, %rbp
-
-	/* we're the parallel process in the parent context */
-	movq	%rbp, %rdi
-	movq	%rbp, %rsi
-	call	os_endp
-
-
-.L10:
-	addq	$56, %rbp
+	addq	$8, %rbp
 	movq	0(%rbp), %r11
 	jmp	*%r11
 
-o_commstime_p0:					/* parallel process to run prefix */
-
-	/* adjust for call */
-	subq	$24, %rbp			/* parent WS now at 128+24 = 152 */
-
-	leaq	176(%rbp), %rax			/* address of channel 'd' */
-	movq	%rax, 8(%rbp)			/* param: in */
-	leaq	200(%rbp), %rax			/* address of channel 'a' */
-	movq	%rax, 16(%rbp)			/* param: out */
-	movq	$.L11, 0(%rbp)			/* return-address */
-	jmp	o_prefix
-.L11:
-	/* adjust after call */
-	addq	$24, %rbp
-
-	movq	%rbp, %rdi
-	movq	0(%rbp), %rsi			/* startp left workspace address here, should be +128 */
-	call	os_endp
-
-
-o_commstime_p1:					/* parallel process to run delta */
-
-	/* adjust for call */
-	subq	$40, %rbp			/* parent WS now at 256+40 = 296 */
-
-	leaq	344(%rbp), %rax			/* address of channel 'a' */
-	movq	%rax, 8(%rbp)			/* param: in */
-	leaq	336(%rbp), %rax			/* address of channel 'b' */
-	movq	%rax, 16(%rbp)			/* param: out0 */
-	leaq	328(%rbp), %rax			/* address of channel 'c' */
-	movq	%rax, 24(%rbp)			/* param: out1 */
-	movq	$.L15, 0(%rbp)			/* return-address */
-	jmp	o_delta
-.L15:
-	/* adjust after call */
-	addq	$40, %rbp
-
-	movq	%rbp, %rdi
-	movq	0(%rbp), %rsi			/* startp left workspace address here, should be +256 */
-	call	os_endp
-
-
-o_commstime_p2:					/* parallel process to run succ */
-
-	/* adjust for call */
-	subq	$32, %rbp			/* parent WS now at 384+32 = 416 */
-
-	leaq	456(%rbp), %rax			/* address of channel 'b' */
-	movq	%rax, 8(%rbp)			/* param: in */
-	leaq	440(%rbp), %rax			/* address of channel 'd' */
-	movq	%rax, 16(%rbp)			/* param: out */
-	movq	$.L16, 0(%rbp)			/* return-address */
-	jmp	o_succ
-.L16:
-	/* adjust after call */
-	addq	$32, %rbp
-
-	movq	%rbp, %rdi
-	movq	0(%rbp), %rsi			/* startp left workspace address here, should be +384 */
-	call	os_endp
-
-
+/*}}}*/
 /*{{{  o_prefix*/
 /*
  *	prefix workspace:
@@ -199,13 +145,9 @@ o_commstime_p2:					/* parallel process to run succ */
 
 .section .rodata
 .align 8
-
 .globl	ow_prefix
-ow_prefix:
-	.quad	72				/* bytes of workspace */
-
+ow_prefix: .quad	72			/* bytes of workspace */
 .text
-
 .globl	o_prefix
 .type	o_prefix, @function
 
@@ -252,13 +194,9 @@ o_prefix:
 
 .section .rodata
 .align 8
-
 .globl	ow_succ
-ow_succ:
-	.quad	72
-
+ow_succ: .quad	72
 .text
-
 .globl	o_succ
 .type	o_succ, @function
 

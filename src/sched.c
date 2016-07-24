@@ -105,34 +105,47 @@ fprintf (stderr, "slick_threadentry(): enqueue initial process at %p, entry-poin
 		enqueue (iws, &psched);
 	}
 
+	bis128_set_bit (&slickss.enabled_threads, psched.sidx);
+
 	slick_schedlinkage (&psched);
 
 	/* assert: never get here */
 	return NULL;
 }
 /*}}}*/
-/*{{{  static void slick_safe_pause (void)*/
+/*{{{  static void slick_safe_pause (psched_t *s)*/
 /*
  *	puts a run-time thread to sleep
  */
-static void slick_safe_pause (void)
+static void slick_safe_pause (psched_t *s)
 {
 	uint32_t buffer, sync;
 
 #if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
-fprintf (stderr, "slick_safe_pause(): thread index %d\n", psched.sidx);
+fprintf (stderr, "slick_safe_pause(): thread index %d\n", s->sidx);
 #endif
-	while (!(sync = att32_swap (&(psched.sync), 0))) {
+	while (!(sync = att32_swap (&(s->sync), 0))) {
 		serialise ();
-		read (psched.signal_out, &buffer, 1);
+		read (s->signal_out, &buffer, 1);
 		serialise ();
 	}
 
-	att32_or (&(psched.sync), sync);		/* put back the flags */
+	att32_or (&(s->sync), sync);		/* put back the flags */
 
 #if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
 fprintf (stderr, "slick_safe_pause(): thread index %d about to resume after pause\n", psched.sidx);
 #endif
+}
+/*}}}*/
+static void slick_wake_thread (psched_t *s, unsigned int sync_bit) /*{{{*/
+{
+	uint32_t data = 0;
+
+	bis128_clear_bit (&slickss.sleeping_threads, s->sidx);
+	write_barrier ();
+	att32_set_bit (&(s->sync), sync_bit);
+	serialise ();
+	write (s->signal_in, &data, 1);
 }
 /*}}}*/
 
@@ -172,34 +185,8 @@ static workspace_t dequeue (psched_t *s)
 {
 	workspace_t tmp = s->fptr;
 
-retry_dequeue:
 	if (tmp == NULL) {
-		/* ran out of processes, or nothing here to start with -- maybe goto sleep, if last: deadlock */
-		uint32_t waiting;
-
-		if (att32_dec_z (&(slickss.nactive))) {
-			/* we were the last one */
-			waiting = att32_val (&(slickss.nwaiting));
-
-			read_barrier ();
-			if (!waiting) {
-				uint32_t active = att32_val (&(slickss.nactive));
-
-				if (!active) {
-					/* none active, none waiting: we're deadlocked */
-					deadlock ();
-				}	/* else something probably waiting woke up, active again -- we sleep */
-			}
-		}
-#if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
-		fprintf (stderr, "dequeue(): thread index %d going to sleep\n", s->sidx);
-#endif
-		slick_safe_pause ();
-		att32_inc (&(slickss.nactive));		/* we're awake again */
-
-		/* FIXME: might need to scoop up work from somewhere */
-		tmp = s->fptr;
-		goto retry_dequeue;
+		return NULL;
 	} else if (tmp == s->bptr) {
 		/* last one */
 		s->fptr = NULL;
@@ -217,7 +204,52 @@ retry_dequeue:
  */
 static void slick_schedule (psched_t *s)
 {
-	workspace_t w = dequeue (s);
+	workspace_t w = NULL;
+
+	do {
+		if (att32_val (&(s->sync))) {
+			uint32_t sync = att32_swap (&(s->sync), 0);
+
+			if (sync & SYNC_TIME) {
+				/*  FIXME: check timer queue */
+			}
+
+		}
+		
+		if (s->fptr == NULL) {
+			/* no more processes -- consider going to sleep */
+			bis128_set_bit (&slickss.sleeping_threads, s->sidx);
+			read_barrier ();
+
+			if (s->tptr != NULL) {
+				slick_safe_pause (s);
+				/* FIXME: check timer queue */
+			} else if (!att32_val (&(s->sync))) {
+				bitset128_t idle;
+
+				bis128_set_bit (&slickss.idle_threads, s->sidx);
+
+				/* FIXME: check for blocking calls, etc. */
+				read_barrier ();
+
+				bis128_and (&slickss.idle_threads, &slickss.sleeping_threads, &idle);
+
+				if (bis128_eq (&idle, &slickss.enabled_threads)) {
+					/* (idle & sleeping) == enabled, so all stuck */
+					deadlock ();
+				} else {
+					slick_safe_pause (s);
+				}
+
+				bis128_clear_bit (&slickss.idle_threads, s->sidx);
+			} else {
+				bis128_clear_bit (&slickss.sleeping_threads, s->sidx);
+			}
+		} else {
+			w = dequeue (s);
+		}
+
+	} while (w == NULL);
 
 #if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
 	fprintf (stderr, "slick_schedule(): scheduling process at %p\n", w);
@@ -275,7 +307,7 @@ static INLINE void trigger_alt_guard (uint64_t val)
 
 	do {
 		state = att64_val ((atomic64_t *)&(other[LState]));
-		nstate = (state - 1) & (~(ALT_NOT_READY | ALT_WAITING));		/* decrement guard count */
+		nstate = (state - 1) & (~(ALT_NOT_READY | ALT_WAITING));		/* decrement guard count, clear NOT_READY and WAITING flags */
 	} while (!att64_cas ((atomic64_t *)&(other[LState]), state, nstate));
 
 	if ((state & ALT_WAITING) || (nstate == 0)) {

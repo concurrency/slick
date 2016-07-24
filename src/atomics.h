@@ -57,6 +57,9 @@ typedef struct TAG_atomic64_t {
 	volatile uint64_t value;
 } __attribute__ ((packed)) atomic64_t;
 
+typedef struct TAG_bitset128_t {
+	volatile uint64_t values[2];
+} __attribute__ ((packed)) bitset128_t;
 
 /*
  * This particular wierdness is used to 'tell' GCC about what memory, "m" constraints might be using,
@@ -66,6 +69,7 @@ typedef struct TAG_atomic64_t {
 
 typedef struct { uint32_t a[100]; } __dummy_atomic32_t;
 typedef struct { uint64_t a[100]; } __dummy_atomic64_t;
+typedef struct { uint64_t a[100]; } __dummy_bitset128_t;
 
 #define __dummy_atomic32(val) (*(__dummy_atomic32_t *)(val))
 #define __dummy_atomic64(val) (*(__dummy_atomic64_t *)(val))
@@ -73,6 +77,8 @@ typedef struct { uint64_t a[100]; } __dummy_atomic64_t;
 
 #define att32_init(X,V) do { (X)->value = (V); } while (0)
 #define att64_init(X,V) do { (X)->value = (V); } while (0)
+
+#define bis128_init(X,B) do { (X)->values[0] = ((B) ? 0xffffffffffffffff : 0); (X)->values[1] = ((B) ? 0xffffffffffffffff : 0); } while (0)
 
 static INLINE uint32_t att32_val (atomic32_t *atval) /*{{{*/
 {
@@ -228,6 +234,56 @@ static INLINE unsigned int att32_cas (atomic32_t *atval, uint32_t oldval, uint32
 	return result;
 }
 /*}}}*/
+static INLINE void att32_set_bit (atomic32_t *atval, unsigned int bit) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; btsl %1, %0		\n"
+			: "+m" (__dummy_atomic32 (atval))
+			: "Ir" (bit)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att32_clear_bit (atomic32_t *atval, unsigned int bit) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; btrl %1, %0		\n"
+			: "+m" (__dummy_atomic32 (atval))
+			: "Ir" (bit)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE unsigned int att32_test_set_bit (atomic32_t *atval, unsigned int bit) /*{{{*/
+{
+	unsigned char result;
+
+	__asm__ __volatile__ ("					\n"
+			"	lock; btsl %2, %0		\n"
+			"	setc %1				\n"
+			: "+m" (__dummy_atomic32 (atval)), "=q" (result)
+			: "Ir" (bit)
+			: "cc"
+			);
+
+	return (unsigned int)result;
+}
+/*}}}*/
+static INLINE unsigned int att32_test_clear_bit (atomic32_t *atval, unsigned int bit) /*{{{*/
+{
+	unsigned char result;
+
+	__asm__ __volatile__ ("					\n"
+			"	lock; btrl %2, %0		\n"
+			"	setc %1				\n"
+			: "+m" (__dummy_atomic32 (atval)), "=q" (result)
+			: "Ir" (bit)
+			: "cc"
+			);
+
+	return (unsigned int)result;
+}
+/*}}}*/
 
 static INLINE void att64_set (atomic64_t *atval, uint64_t value) /*{{{*/
 {
@@ -268,6 +324,90 @@ static INLINE unsigned int att64_cas (atomic64_t *atval, uint64_t oldval, uint64
 }
 /*}}}*/
 
+static INLINE uint64_t bis128_val_hi (bitset128_t *bs) /*{{{*/
+{
+	return att64_val ((atomic64_t *)&(bs->values[1]));
+}
+/*}}}*/
+static INLINE uint64_t bis128_val_lo (bitset128_t *bs) /*{{{*/
+{
+	return att64_val ((atomic64_t *)&(bs->values[0]));
+}
+/*}}}*/
+static INLINE void bis128_set_hi (bitset128_t *bs, uint64_t val) /*{{{*/
+{
+	att64_set ((atomic64_t *)&(bs->values[1]), val);
+}
+/*}}}*/
+static INLINE void bis128_set_lo (bitset128_t *bs, uint64_t val) /*{{{*/
+{
+	att64_set ((atomic64_t *)&(bs->values[0]), val);
+}
+/*}}}*/
+static INLINE void bis128_set_bit (bitset128_t *bs, unsigned int bit) /*{{{*/
+{
+	unsigned int idx = bit >> 6;		/* div 64 */
+
+	__asm__ __volatile__ ("				\n"
+			"	lock; btsq %1, %0	\n"
+			: "+m" (__dummy_atomic64 (&(bs->values[idx])))
+			: "Jr" ((uint64_t)(bit & 0x3f))
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void bis128_clear_bit (bitset128_t *bs, unsigned int bit) /*{{{*/
+{
+	unsigned int idx = bit >> 6;		/* div 64 */
+
+	__asm__ __volatile__ ("				\n"
+			"	lock; btrq %1, %0	\n"
+			: "+m" (__dummy_atomic64 (&(bs->values[idx])))
+			: "Jr" ((uint64_t)(bit & 0x3f))
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE unsigned int bis128_bsf (bitset128_t *bs) /*{{{*/
+{
+	unsigned int res;
+
+	res = 64;
+	if (!bs->values[0]) {
+		if (!bs->values[1]) {
+			return 128;
+		}
+		__asm__ __volatile__ ("			\n"
+			"	bsfq %1, %0		\n"
+			: "=r" (res)
+			: "r" (bs->values[1])
+			: "cc"
+			);
+		return (res + 64);
+	}
+	__asm__ __volatile__ ("			\n"
+		"	bsfq %1, %0		\n"
+		: "=r" (res)
+		: "r" (bs->values[0])
+		: "cc"
+		);
+	return res;
+}
+/*}}}*/
+static INLINE void bis128_and (bitset128_t *s0, bitset128_t *s1, bitset128_t *d) /*{{{*/
+{
+	uint64_t lo = bis128_val_lo (s0) & bis128_val_lo (s1);
+	uint64_t hi = bis128_val_hi (s0) & bis128_val_hi (s1);
+
+	bis128_set_hi (d, hi);
+	bis128_set_lo (d, lo);
+}
+/*}}}*/
+static INLINE unsigned int bis128_eq (bitset128_t *a, bitset128_t *b) /*{{{*/
+{
+	return (bis128_val_lo (a) == bis128_val_lo (b)) && (bis128_val_hi (a) == bis128_val_hi (b));
+}
+/*}}}*/
 
 #endif	/* !__ATOMICS_H */
 

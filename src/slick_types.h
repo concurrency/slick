@@ -67,6 +67,11 @@ typedef struct TAG_slick_t {
 } slick_t;
 
 typedef struct TAG_slick_ss_t {
+	/* moderately wide bit-fields */
+	bitset128_t enabled_threads;
+	bitset128_t idle_threads;
+	bitset128_t sleeping_threads;
+
 	atomic32_t nactive;		/* number of active threads */
 	atomic32_t nwaiting;		/* number waiting for something (timeout, etc.) */
 	int32_t verbose;
@@ -80,6 +85,21 @@ typedef struct TAG_pbatch_t {		/* batch of processes */
 	uint64_t priority;
 	cpu_set_t cpuset;		/* 128 bytes mostly */
 } __attribute__ ((packed)) pbatch_t;
+
+/* scheduler sync flags (for psched_t.sync) */
+#define SYNC_INTR_BIT	1
+#define SYNC_TIME_BIT	2
+#define SYNC_BMAIL_BIT	4
+#define SYNC_PMAIL_BIT	5
+#define SYNC_WORK_BIT	6
+#define SYNC_TQ_BIT	7
+
+#define SYNC_INTR	(1 << SYNC_INTR_BIT)
+#define SYNC_TIME	(1 << SYNC_TIME_BIT)
+#define SYNC_BMAIL	(1 << SYNC_BMAIL_BIT)
+#define SYNC_PMAIL	(1 << SYNC_PMAIL_BIT)
+#define SYNC_WORK	(1 << SYNC_WORK_BIT)
+#define SYNC_TQ		(1 << SYNC_TQ_BIT)
 
 typedef struct TAG_psched_t {		/* scheduler structure */
 	workspace_t fptr;		/* run-queue for this scheduler */
@@ -98,7 +118,7 @@ typedef struct TAG_psched_t {		/* scheduler structure */
 	void *saved_r11;
 
 	slick_t *sptr;			/* pointer to global state */
-	int32_t sidx;			/* which particular RT thread we are */
+	int32_t sidx;			/* which particular RT thread we are [0..] */
 	int32_t dummy0;
 
 	int32_t signal_in;		/* sleep/wake-up pipe FDs */

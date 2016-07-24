@@ -5,7 +5,7 @@
 
 /*
  *	NOTE: when calling os_... as a C function, the only thing we
- *	expect to be preserved is %ebp (Wptr)
+ *	expect to be preserved is %rbp (Wptr)
  */
 
 .text
@@ -24,7 +24,7 @@ o_commstime_shutdown:
 
 o_commstime_startup:
 	leaq	o_commstime_shutdown(%rip), %rax
-	movq	%rax, 0(%ebp)			/* save return-address */
+	movq	%rax, 0(%rbp)			/* save return-address */
 	jmp	o_commstime
 
 
