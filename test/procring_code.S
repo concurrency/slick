@@ -26,12 +26,19 @@ o_procring_startup:
 	movq	%rax, 0(%rbp)			/* save return-address */
 	jmp	o_procring
 
-#define NPROCS 128
 
-#define WSADJ	(64+((NPROCS+1) * 8))
-#define OFFS_A	(56+((NPROCS+1) * 8))
-#define OFFS_B	(48+((NPROCS+1) * 8))
-#define OFFS_D	(40+((NPROCS+1) * 8))
+#define NPROCS		128
+#define NPROCSP1	(NPROCS+1)
+
+#define WSADJ	(64+(NPROCSP1 * 8))
+#define OFFS_A	(56+(NPROCSP1 * 8))
+#define OFFS_B	(48+(NPROCSP1 * 8))
+#define OFFS_D	(40+(NPROCSP1 * 8))
+
+#define PCOUNT		(4+NPROCS)
+#define PCOUNTP1	(PCOUNT+1)
+
+#define WSSIZE		((768 + (NPROCSP1 * 8)) + (NPROCS * 128))
 
 /*
  *	procring workspace:
@@ -61,10 +68,10 @@ o_procring_startup:
  *	[NPROCS * <<id WS>>]
  */
 
-.section rodata
+.section .rodata
 .align 8
 .globl	ow_procring
-ow_procring:	.quad	-1
+ow_procring:	.quad	WSSIZE
 .text
 .globl	o_procring
 .type	o_procring, @function
@@ -72,6 +79,63 @@ ow_procring:	.quad	-1
 o_procring:
 	subq	$WSADJ, %rbp
 
+	movq	$0, OFFS_A(%rbp)	/* initialise channel a */
+	movq	$0, OFFS_B(%rbp)	/* initialise channel b */
+	movq	$0, OFFS_D(%rbp)	/* initialise channel d */
+
+	movq	$NPROCSP1, 24(%rbp)	/* replicator count */
+	movq	$0, 32(%rbp)		/* replicator var */
+	leaq	40(%rbp), %rax		/* base address of channel-array */
+.L110:
+	movq	$0, (%rax)		/* initialise channel c[..] */
+	addq	$8, %rax		/* next channel */
+	decq	24(%rbp)
+	jnz	.L110
+
+	/* setup for PAR */
+	movq	$0, 16(%rbp)		/* FIXME: priofinity */
+	movq	$PCOUNTP1, 8(%rbp)	/* PAR count (plus one for ourselves, since the last thing is the replicated bit) */
+	movq	$.L12, 0(%rbp)		/* PAR join-lab */
+
+	/* start PAR branch with 'prefix' */
+	movq	%rbp, %rdi
+	leaq	-128(%rbp), %rsi
+	movq	$o_procring_p0, %rdx
+	call	os_startp
+
+	/* start PAR branch with 'delta' */
+	movq	%rbp, %rdi
+	leaq	-256(%rbp), %rsi
+	movq	$o_procring_p1, %rdx
+	call	os_startp
+
+o_procring_p0:				/* parallel process for prefix */
+	subq	$24, %rbp		/* adjust for call */
+	movq	24(%rbp), %rax		/* staticlink */
+	leaq	OFFS_B(%rax), %rcx
+	movq	%rcx, 8(%rbp)		/* param: in */
+	leaq	40(%rax), %rcx
+	movq	%rcx, 16(%rbp)		/* param: out == c[0] */
+	movq	$.L150, 0(%rbp)		/* return-address */
+	jmp	o_prefix
+.L150:
+	addq	$24, %rbp		/* adjust after call */
+	movq	%rbp, %rdi
+	movq	0(%rbp), %rsi		/* staticlink == PAR WS */
+	call	os_endp
+
+o_procring_p1:				/* parallel process for delta */
+	subq	$40, %rbp		/* adjust for call */
+	movq	24(%rbp), %rax		/* staticlink */
+
+
+	movq	$.L151, 0(%rbp)		/* return-address */
+	jmp	o_delta
+.L151:
+	addq	$40, %rbp		/* adjust after call */
+	movq	%rbp, %rdi
+	movq	0(%rbp), %rsi		/* staticlink == PAR WS */
+	call	os_endp
 
 .L12:					/* join lab here */
 	addq	$WSADJ, %rbp
