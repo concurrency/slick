@@ -27,13 +27,14 @@ o_procring_startup:
 	jmp	o_procring
 
 
-#define NPROCS		128
+#define NPROCS		1024
 #define NPROCSP1	(NPROCS+1)
 
-#define WSADJ	(64+(NPROCSP1 * 8))
-#define OFFS_A	(56+(NPROCSP1 * 8))
-#define OFFS_B	(48+(NPROCSP1 * 8))
-#define OFFS_D	(40+(NPROCSP1 * 8))
+#define WSADJ		(64+(NPROCSP1 * 8))
+#define OFFS_A		(56+(NPROCSP1 * 8))
+#define OFFS_B		(48+(NPROCSP1 * 8))
+#define OFFS_D		(40+(NPROCSP1 * 8))
+#define OFFS_CN		(40+(NPROCS * 8))
 
 #define PCOUNT		(4+NPROCS)
 #define PCOUNTP1	(PCOUNT+1)
@@ -61,10 +62,10 @@ o_procring_startup:
  *
  *	size = 96+X + 8 = 104+((NPROCS+1) * 8)
  *
- *	<<consume WS>>
  *	<<prefix WS>>
  *	<<delta WS>>
  *	<<succ WS>>
+ *	<<consume WS>>
  *	[NPROCS * <<id WS>>]
  */
 
@@ -109,7 +110,53 @@ o_procring:
 	movq	$o_procring_p1, %rdx
 	call	os_startp
 
-o_procring_p0:				/* parallel process for prefix */
+	/* start PAR branch with 'succ' */
+	movq	%rbp, %rdi
+	leaq	-384(%rbp), %rsi
+	movq	$o_procring_p2, %rdx
+	call	os_startp
+
+	/* start PAR branch with 'consume' */
+	movq	%rbp, %rdi
+	leaq	-512(%rbp), %rsi
+	movq	$o_procring_p3, %rdx
+	call	os_startp
+
+	/* start 'id' processes */
+	movq	$NPROCS, 24(%rbp)	/* replicator count */
+	movq	$0, 32(%rbp)		/* replicator var */
+.L111:
+	movq	32(%rbp), %rax		/* i */
+	shlq	$7, %rax		/* times 128 */
+	leaq	-640(%rbp), %rcx
+	subq	%rax, %rcx		/* drop down to relevant process */
+	/* XXX: assume we have a word _above_ the startp'd thing allocated for locals (i.e. 'i') */
+	movq	32(%rbp), %rax		/* i */
+	movq	%rax, 8(%rcx)		/* store in new workspace */
+
+	movq	%rbp, %rdi
+	movq	%rcx, %rsi
+	movq	$o_procring_p4, %rdx
+	call	os_startp
+
+	/* started, next please */
+	movq	32(%rbp), %rax		/* i */
+	incq	%rax
+	movq	%rax, 32(%rbp)		/* i++ */
+	movq	24(%rbp), %rax		/* replicator count */
+	decq	%rax
+	jz	.L112
+	movq	%rax, 24(%rbp)		/* count-- */
+	jmp	.L111
+.L112:
+
+	/* when we get here, all parallel processes started, so we just stop */
+	movq	%rbp, %rdi
+	movq	%rbp, %rsi
+	call	os_endp
+
+
+o_procring_p0:				/*{{{  parallel process for prefix */
 	subq	$24, %rbp		/* adjust for call */
 	movq	24(%rbp), %rax		/* staticlink */
 	leaq	OFFS_B(%rax), %rcx
@@ -124,10 +171,18 @@ o_procring_p0:				/* parallel process for prefix */
 	movq	0(%rbp), %rsi		/* staticlink == PAR WS */
 	call	os_endp
 
-o_procring_p1:				/* parallel process for delta */
-	subq	$40, %rbp		/* adjust for call */
-	movq	24(%rbp), %rax		/* staticlink */
 
+/*}}}*/
+o_procring_p1:				/*{{{  parallel process for delta */
+	subq	$40, %rbp		/* adjust for call */
+	movq	40(%rbp), %rax		/* staticlink */
+
+	leaq	OFFS_CN(%rax), %rcx
+	movq	%rcx, 8(%rbp)		/* param: in */
+	leaq	OFFS_D(%rax), %rcx
+	movq	%rcx, 16(%rbp)		/* param: out0 */
+	leaq	OFFS_A(%rax), %rcx
+	movq	%rcx, 24(%rbp)		/* param: out1 */
 
 	movq	$.L151, 0(%rbp)		/* return-address */
 	jmp	o_delta
@@ -136,6 +191,66 @@ o_procring_p1:				/* parallel process for delta */
 	movq	%rbp, %rdi
 	movq	0(%rbp), %rsi		/* staticlink == PAR WS */
 	call	os_endp
+
+
+/*}}}*/
+o_procring_p2:				/*{{{  parallel process for succ*/
+	subq	$24, %rbp		/* adjust for call */
+	movq	24(%rbp), %rax		/* staticlink */
+
+	leaq	OFFS_A(%rax), %rcx
+	movq	%rcx, 8(%rbp)		/* param: in */
+	leaq	OFFS_B(%rax), %rcx
+	movq	%rcx, 16(%rbp)		/* param: out */
+
+	movq	$.L152, 0(%rbp)		/* return-address */
+	jmp	o_succ
+.L152:
+	addq	$24, %rbp		/* adjust after call */
+	movq	%rbp, %rdi
+	movq	0(%rbp), %rsi		/* staticlink == PAR WS */
+	call	os_endp
+
+
+/*}}}*/
+o_procring_p3:				/*{{{  parallel process for consume*/
+	subq	$16, %rbp		/* adjust for call */
+	movq	16(%rbp), %rax		/* staticlink */
+
+	leaq	OFFS_D(%rax), %rcx
+	movq	%rcx, 8(%rbp)		/* param: in */
+	movq	$.L153, 0(%rbp)		/* return-address */
+	jmp	o_consume
+.L153:
+	addq	$16, %rbp		/* adjust after call */
+	movq	%rbp, %rdi
+	movq	0(%rbp), %rsi		/* staticlink == PAR WS */
+	call	os_endp
+
+
+/*}}}*/
+o_procring_p4:				/*{{{  replicated parallel process for id*/
+	subq	$24, %rbp		/* adjust for call */
+	movq	24(%rbp), %rax		/* staticlink */
+
+	movq	32(%rbp), %rcx		/* replicator value [0..] */
+	shlq	$3, %rcx		/* times 8 */
+	leaq	40(%rax), %rdx		/* address of c[0] */
+	addq	%rcx, %rdx		/* address of c[i] */
+	movq	%rdx, 8(%rbp)		/* param: in */
+	addq	$8, %rdx		/* address of c[i+1] */
+	movq	%rdx, 16(%rbp)		/* param: out */
+
+	movq	$.L154, 0(%rbp)		/* return-address */
+	jmp	o_id
+.L154:
+	addq	$24, %rbp		/* adjust after call */
+	movq	%rbp, %rdi
+	movq	0(%rbp), %rsi		/* staticlink == PAR WS */
+	call	os_endp
+
+/*}}}*/
+
 
 .L12:					/* join lab here */
 	addq	$WSADJ, %rbp
@@ -374,9 +489,7 @@ ow_consume:
 	.quad	72
 
 .LC0:
-	.string	"The value was %ld, nanosecs %lu\n"
-.LC1:
-	.string "Loop time %lu\n"
+	.string	"The value was %ld, nanosecs per loop %lu\n"
 
 .text
 
@@ -393,7 +506,7 @@ o_consume:
 
 .L4:
 	/* do 1000000 inputs, use Wptr[0] as counter */
-	movq	$10000000, 0(%rbp)
+	movq	$1000000, 0(%rbp)
 .L5:
 
 	movq	%rbp, %rdi
@@ -410,10 +523,10 @@ o_consume:
 	call	os_ldtimer
 	movq	%rax, 16(%rbp)			/* int64 t1 */
 
-	/* t0 := (t1 - t0) / 10000000 */
+	/* t0 := (t1 - t0) / 1000000 */
 	movq	16(%rbp), %rax			/* int64 t1 */
 	subq	24(%rbp), %rax			/* -t0 */
-	movq	$10000000, %rcx
+	movq	$1000000, %rcx
 	movq	$0, %rdx
 	divq	%rcx				/* rdx:rax div by rcx -> rax=quot, rdx=rem */
 	movq	%rax, 24(%rbp)			/* int64 t0 */
@@ -422,13 +535,6 @@ o_consume:
 	movq	$.LC0, %rdi
 	movq	8(%rbp), %rsi			/* int64 v */
 	movq	24(%rbp), %rdx			/* int64 t0 */
-	addq	$3, %rdx			/* += 3 (round up) */
-	shrq	$2, %rdx			/* /4 */
-	movl	$0, %eax			/* vector count */
-	call	printf
-
-	movq	$.LC1, %rdi
-	movq	24(%rbp), %rsi			/* int64 t0 */
 	movl	$0, %eax			/* vector count */
 	call	printf
 
