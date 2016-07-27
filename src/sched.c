@@ -106,6 +106,11 @@ fprintf (stderr, "slick_threadentry(): enqueue initial process at %p, entry-poin
 	}
 
 	bis128_set_bit (&slickss.enabled_threads, psched.sidx);
+	write_barrier ();
+
+	if (slickss.verbose) {
+		slick_message ("run-time thread %d about to enter scheduler.", psched.sidx);
+	}
 
 	slick_schedlinkage (&psched);
 

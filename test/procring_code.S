@@ -27,8 +27,9 @@ o_procring_startup:
 	jmp	o_procring
 
 
-#define NPROCS		1024
+#define NPROCS		10485760
 #define NPROCSP1	(NPROCS+1)
+#define REPORT		10
 
 #define WSADJ		(64+(NPROCSP1 * 8))
 #define OFFS_A		(56+(NPROCSP1 * 8))
@@ -505,8 +506,8 @@ o_consume:
 	movq	%rax, 24(%rbp)			/* int64 t0 */
 
 .L4:
-	/* do 1000000 inputs, use Wptr[0] as counter */
-	movq	$1000000, 0(%rbp)
+	/* do REPORT inputs, use Wptr[0] as counter */
+	movq	$REPORT, 0(%rbp)
 .L5:
 
 	movq	%rbp, %rdi
@@ -523,10 +524,10 @@ o_consume:
 	call	os_ldtimer
 	movq	%rax, 16(%rbp)			/* int64 t1 */
 
-	/* t0 := (t1 - t0) / 1000000 */
+	/* t0 := (t1 - t0) / REPORT */
 	movq	16(%rbp), %rax			/* int64 t1 */
 	subq	24(%rbp), %rax			/* -t0 */
-	movq	$1000000, %rcx
+	movq	$REPORT, %rcx
 	movq	$0, %rdx
 	divq	%rcx				/* rdx:rax div by rcx -> rax=quot, rdx=rem */
 	movq	%rax, 24(%rbp)			/* int64 t0 */

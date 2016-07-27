@@ -344,6 +344,21 @@ void slick_startup (void *ws, void (*proc)(void))
 		if (pthread_create (&slick.rt_threadid[i], &slick.rt_threadattr[i], slick_threadentry, &threadargs[i])) {
 			slick_fatal ("failed to create run-time thread [%s]", strerror (errno));
 		}
+
+		if (!i) {
+			int count = 10;
+			struct timespec ts = {tv_sec: 0, tv_nsec: 10000000};		/* 10ms */
+
+			/* first thread is special, wait for it to set the enabled bit */
+			while (!(bis128_val_lo (&slickss.enabled_threads) & 1)) {
+				sched_yield ();
+				nanosleep (&ts, NULL);
+				count--;
+				if (!count) {
+					slick_fatal ("waited too long for first thread to become enabled.");
+				}
+			}
+		}
 	}
 
 #if 1
