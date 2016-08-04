@@ -70,11 +70,7 @@ void *slick_threadentry (void *arg)
 
 	att32_init (&(psched.sync), 0);
 
-	dflbatch.nb = NULL;
-	dflbatch.fptr = NULL;
-	dflbatch.bptr = NULL;
-	dflbatch.priority = 0;
-	CPU_ZERO (&dflbatch.cpuset);
+	init_pbatch_t (&dflbatch);
 
 	psched.cbch = &dflbatch;
 

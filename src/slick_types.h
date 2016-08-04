@@ -1,6 +1,7 @@
 /*
  *	slick_types.h -- types for the scheduler
  *	Copyright (C) 2016 Fred Barnes, University of Kent <frmb@kent.ac.uk>
+ *	Based largely on CCSP code by Carl Ritson, Fred Barnes, Jim Moores, and others
  *
  *	This library is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU Lesser General Public
@@ -22,12 +23,26 @@
 #define __SLICK_TYPES_H
 
 
+/*{{{  assorted limiting constants*/
+
 /* a reasonable limit for now -- mirroring number of cores */
-#define MAX_RT_THREADS	(128)
+#define MAX_RT_THREADS		(128)
+#define MAX_PRIORITY_LEVELS	(32)
 
 
+/*}}}*/
+/*{{{  typedef .._t type definitions from structures and other*/
 typedef uint64_t *workspace_t;		/* pointer to process workspace */
 
+typedef struct TAG_slick_t slick_t;
+typedef struct TAG_slick_ss_t slick_ss_t;
+
+typedef struct TAG_pbatch_t pbatch_t;
+
+/*}}}*/
+/*{{{  various virtual transputer constants/offsets*/
+
+/* Note: quadword (8-byte) offsets */
 #define LSavedPri	2		/* saved LPriofinity for parallel */
 #define LCount		1		/* process count for parallel */
 #define LIPtrSucc	0		/* successor IPtr for parallel */
@@ -53,8 +68,9 @@ typedef uint64_t *workspace_t;		/* pointer to process workspace */
 #define TimeNotSet_p		0x0002000000000000
 #define NoneSelected_o		0x0004000000000000
 
-
-typedef struct TAG_slick_t {
+/*}}}*/
+/*{{{  slick_t, slickss_t: global scheduler state*/
+struct TAG_slick_t {
 	int rt_nthreads;		/* number of run-time threads in use (1 for each CPU by default) */
 	char **prog_argv;		/* top-level program arguments (copy at top-level) */
 	int prog_argc;			/* number of arguments (left) */
@@ -64,27 +80,58 @@ typedef struct TAG_slick_t {
 	pthread_t rt_threadid[MAX_RT_THREADS];		/* thread ID for each run-time thread */
 	pthread_attr_t rt_threadattr[MAX_RT_THREADS];	/* thread attributes for each run-time thread */
 
-} slick_t;
+};
 
-typedef struct TAG_slick_ss_t {
+struct TAG_slick_ss_t {
 	/* moderately wide bit-fields */
 	bitset128_t enabled_threads;
 	bitset128_t idle_threads;
 	bitset128_t sleeping_threads;
 
-	atomic32_t nactive;		/* number of active threads */
-	atomic32_t nwaiting;		/* number waiting for something (timeout, etc.) */
 	int32_t verbose;
-} slick_ss_t;
+};
 
+/*}}}*/
+/*{{{  pbatch_t: batch of processes*/
 
-typedef struct TAG_pbatch_t {		/* batch of processes */
-	struct TAG_pbatch_t *nb;	/* next batch */
+#define PBATCH_ALLOC_SIZE	(sizeof (uint64) * 16)
+
+struct TAG_pbatch_t {		/* batch of processes */
 	workspace_t fptr;
 	workspace_t bptr;
-	uint64_t priority;
-	cpu_set_t cpuset;		/* 128 bytes mostly */
-} __attribute__ ((packed)) pbatch_t;
+	uint64_t size;
+
+	struct TAG_pbatch_t *nb;	/* next batch */
+
+	atomic64_t state;		/* migration fields */
+	uint64_t priofinity;
+
+	struct TAG_pbatch_t *prio[8];	/* barrier fields */
+	uint64_t dummy[2];		/* pad to 16*8=128 bytes */
+} __attribute__ ((packed));
+
+/*}}}*/
+static inline void init_pbatch_t (pbatch_t *b) /*{{{*/
+{
+	int i;
+
+	b->fptr = NULL;
+	b->bptr = NULL;
+	b->size = 0;
+	b->nb = NULL;
+	att64_init (&(b->state), 0);
+	b->priofinity = 0;
+	for (i=0; i<8; i++) {
+		b->prio[i] = NULL;
+	}
+}
+/*}}}*/
+static inline void reinit_pbatch_t (pbatch_t *b) /*{{{*/
+{
+	b->fptr = NULL;
+	b->size = 0;
+}
+/*}}}*/
 
 /* scheduler sync flags (for psched_t.sync) */
 #define SYNC_INTR_BIT	1
