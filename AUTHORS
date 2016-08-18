@@ -1,0 +1,16 @@
+Slick: A 64-bit Transputer-ish process scheduler:
+	Fred Barnes
+
+Based on the multicore work-stealing CCSP scheduler from KRoC 1.6:
+	Carl Ritson
+
+Based on the single-core CCSP scheduler from KRoC:
+	Jim Moores
+	Fred Barnes
+	Carl Ritson
+	Adam Sampson
+	Marcel Boosten
+
+Portions based on the OFA schedulers from KRoC:
+	David Wood
+	Peter Welch

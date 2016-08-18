@@ -27,10 +27,10 @@
 slick_schedlinkage:
 	movq	%rdi, %rax			/* address of psched_t structure for this scheduler (thread-local) */
 
-	movq	%rsp, 48(%rax)			/* save registers */
-	movq	%rbp, 56(%rax)
-	movq	%r10, 64(%rax)
-	movq	%r11, 72(%rax)
+	movq	%rsp, (%rax)			/* save registers */
+	movq	%rbp, 8(%rax)
+	movq	%r10, 16(%rax)
+	movq	%r11, 24(%rax)
 
 	call	os_entry
 

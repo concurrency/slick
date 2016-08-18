@@ -1,5 +1,5 @@
 /*
- *	atomics.h -- various inline assembly macros
+ *	atomics.h -- various inline assembly macros and related
  *	Copyright (C) 2016 Fred Barnes, University of Kent <frmb@kent.ac.uk>
  *
  *	This library is free software; you can redistribute it and/or
@@ -22,7 +22,7 @@
  * Based approximately on CCSP's i386/atomics.h (mostly Carl) with parts
  * of that based on include/asm-i386/spinlock.h in the Linux kernel.
  *
- * and some stuff from i386/asm_ops.h
+ * and some stuff from i386/asm_ops.h and others in CCSP
  */
 
 #ifndef __ATOMICS_H
@@ -35,19 +35,35 @@
 /* borrowed from Carl's inlining.h in CCSP */
 #define INLINE __attribute__((always_inline)) inline
 
+#define __ALIGN(X) __attribute__((aligned (X)))
+
+#define CACHELINE_BYTES		(64)
+#define CACHELINE_LWORDS	(8)
+
+#define CACHELINE_ALIGN __ALIGN(CACHELINE_BYTES)
 
 #define memory_barrier() __asm__ __volatile__ ("mfence\n" : : : "memory");
 #define read_barrier() __asm__ __volatile__ ("lfence\n" : : : "memory");
 #define write_barrier() __asm__ __volatile__ ("sfence\n" : : : "memory");
 
-/* serialise -- strongest barrier */
-static INLINE void serialise (void) {
+static INLINE void serialise (void) /*{{{ : strongest barrier */
+{
 	__asm__ __volatile__ ("				\n"
 			"	movl	$0, %%eax	\n"
 			"	cpuid			\n"
 			: : : "cc", "memory", "rax", "rbx", "rcx", "rdx");
 }
-
+/*}}}*/
+static INLINE void idle_cpu (void) /*{{{ : nop, but with busy-wait hint for the CPU */
+{
+	__asm__ __volatile__ ("			\n"
+			"	pause		\n"
+			"	pause		\n"
+			"	pause		\n"
+			"	pause		\n"
+			:::);
+}
+/*}}}*/
 
 typedef struct TAG_atomic32_t {
 	volatile uint32_t value;
@@ -60,6 +76,46 @@ typedef struct TAG_atomic64_t {
 typedef struct TAG_bitset128_t {
 	volatile uint64_t values[2];
 } __attribute__ ((packed)) bitset128_t;
+
+
+static INLINE unsigned int bsf32 (uint32_t v) /*{{{*/
+{
+	unsigned int r = 32;
+
+	__asm__ __volatile__ ("				\n"
+			"	bsfl	%1, %0		\n"
+			: "=r" (r)
+			: "r" (v)
+			: "cc");
+	return r;
+}
+/*}}}*/
+static INLINE unsigned int bsf64 (uint64_t v) /*{{{*/
+{
+	uint64_t r = 64;
+
+	__asm__ __volatile__ ("				\n"
+			"	bsfq	%1, %0		\n"
+			: "=r" (r)
+			: "r" (v)
+			: "cc");
+	return (unsigned int)r;
+}
+/*}}}*/
+
+static INLINE unsigned int one_if_z64 (uint64_t val, uint64_t mask) /*{{{*/
+{
+	unsigned char r;
+
+	__asm__ __volatile__ ("				\n"
+			"	test	%1, %2		\n"
+			"	setz	%0		\n"
+			: "=q" (r)
+			: "ir" (mask), "r" (val)
+			: "cc");
+	return (unsigned int)r;
+}
+/*}}}*/
 
 /*
  * This particular wierdness is used to 'tell' GCC about what memory, "m" constraints might be using,
@@ -321,6 +377,46 @@ static INLINE unsigned int att64_cas (atomic64_t *atval, uint64_t oldval, uint64
 			);
 
 	return result;
+}
+/*}}}*/
+static INLINE void att64_set_bit (atomic64_t *atval, unsigned int bit) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; btsq %1, %0		\n"
+			: "+m" (__dummy_atomic64 (atval))
+			: "Ir" (bit)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att64_unsafe_set_bit (atomic64_t *atval, unsigned int bit) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	btsq	%1, %0			\n"
+			: "+m" (__dummy_atomic64 (atval))
+			: "Ir" ((uint64_t)bit)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att64_clear_bit (atomic64_t *atval, unsigned int bit) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; btrq %1, %0		\n"
+			: "+m" (__dummy_atomic64 (atval))
+			: "Ir" (bit)
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att64_unsafe_clear_bit (atomic64_t *atval, unsigned int bit) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	btrq 	%1, %0			\n"
+			: "+m" (__dummy_atomic64 (atval))
+			: "Ir" ((uint64_t)bit)
+			: "cc"
+			);
 }
 /*}}}*/
 

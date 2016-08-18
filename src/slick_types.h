@@ -29,6 +29,14 @@
 #define MAX_RT_THREADS		(128)
 #define MAX_PRIORITY_LEVELS	(32)
 
+/* for batch scheduling */
+#define BATCH_EMPTIED		(0x4000000000000000)
+#define BATCH_PPD		(8)			/* per-process dispatch */
+#define BATCH_PPD_SHIFT		(3)
+#define BATCH_MD_MASK		(0x7f)			/* maximum dispatches as mask */
+
+#define BATCH_DIRTY_BIT		(63)
+#define BATCH_DIRTY		((uint64_t)1 << BATCH_DIRTY_BIT)
 
 /*}}}*/
 /*{{{  typedef .._t type definitions from structures and other*/
@@ -36,8 +44,14 @@ typedef uint64_t *workspace_t;		/* pointer to process workspace */
 
 typedef struct TAG_slick_t slick_t;
 typedef struct TAG_slick_ss_t slick_ss_t;
-
 typedef struct TAG_pbatch_t pbatch_t;
+
+typedef struct TAG_runqueue_t runqueue_t;
+typedef struct TAG_mwindow_t mwindow_t;
+typedef struct TAG_tqnode_t tqnode_t;
+
+typedef struct TAG_psched_t psched_t;
+typedef struct TAG_slickts_t slickts_t;
 
 /*}}}*/
 /*{{{  various virtual transputer constants/offsets*/
@@ -69,6 +83,18 @@ typedef struct TAG_pbatch_t pbatch_t;
 #define NoneSelected_o		0x0004000000000000
 
 /*}}}*/
+/*{{{  priority and affinity constants/macros*/
+
+#define AFFINITY_MASK		(0xffffffffffffffe0)
+#define AFFINITY_SHIFT		(5)
+#define PRIORITY_MASK		(0x000000000000001f)
+
+#define PHasAffinity(x)		((x) & AFFINITY_MASK)
+#define PAffinity(x)		(((x) & AFFINITY_MASK) >> AFFINITY_SHIFT)
+#define PPriority(x)		((x) & PRIORITY_MASK)
+#define BuildPriofinity(a,p)	((((a) << AFFINITY_SHIFT) & AFFINITY_MASK) | ((p) & PRIORITY_MASK))
+
+/*}}}*/
 /*{{{  slick_t, slickss_t: global scheduler state*/
 struct TAG_slick_t {
 	int rt_nthreads;		/* number of run-time threads in use (1 for each CPU by default) */
@@ -94,7 +120,7 @@ struct TAG_slick_ss_t {
 /*}}}*/
 /*{{{  pbatch_t: batch of processes*/
 
-#define PBATCH_ALLOC_SIZE	(sizeof (uint64) * 16)
+#define PBATCH_ALLOC_SIZE	(sizeof (uint64_t) * 16)
 
 struct TAG_pbatch_t {		/* batch of processes */
 	workspace_t fptr;
@@ -132,8 +158,116 @@ static inline void reinit_pbatch_t (pbatch_t *b) /*{{{*/
 	b->size = 0;
 }
 /*}}}*/
+/*{{{  batch_... macros*/
 
-/* scheduler sync flags (for psched_t.sync) */
+#define batch_isdirty(b)		(att64_val (&((b)->state)) & BATCH_DIRTY)
+
+#define batch_mark_clean(b)		do { att64_clear_bit (&((b)->state), BATCH_DIRTY_BIT); } while (0)
+#define batch_mark_dirty(b)		do { att64_set_bit (&((b)->state), BATCH_DIRTY_BIT); } while (0)
+
+#define batch_set_clean(b)		do { att64_set (&((b)->state), 0); } while (0)
+#define batch_set_dirty(b)		do { att64_set (&((b)->state), BATCH_DIRTY); } while (0)
+
+#define batch_set_dirty_value(b,v)	do { att64_set (&((b)->state), (v & 1)); } while (0)
+#define batch_window(b)			(att64_val (&((b)->state)) & 0xff)
+#define batch_set_window(b,w)		do { att64_set (&((b)->state), BATCH_DIRTY | (w)); } while (0)
+
+#define batch_isempty(b)		((b)->fptr == NULL)
+
+/*}}}*/
+
+
+/*{{{  runqueue_t: batch queue*/
+
+struct TAG_runqueue_t {
+	pbatch_t *fptr;
+	pbatch_t *bptr;
+	uint64_t priofinity;		/* of pending batch */
+	pbatch_t *pending;
+} __attribute__ ((packed));
+
+
+/*}}}*/
+static inline void init_runqueue_t (runqueue_t *r) /*{{{*/
+{
+	r->fptr = NULL;
+	r->bptr = NULL;
+	r->priofinity = 0;
+	r->pending = NULL;
+}
+/*}}}*/
+
+
+/*{{{  constants for migration windows*/
+
+/* for migration windows */
+#define MWINDOW_BM_OFFSET	(8)
+#define MWINDOW_HEAD(s)		((s) & 0xff)
+#define MWINDOW_NEW_STATE(s,h)	((((s) | (0x100 << (h))) & ~0xff) | (h))
+#define MWINDOW_STATE		(0)
+
+#define MWINDOW_SIZE		(15)
+#define MWINDOW_HEAD_WRAP_BIT	(4)
+#define MWINDOW_MASK		0xffff
+
+
+/*}}}*/
+/*{{{  mwindow_t: migration window*/
+
+struct TAG_mwindow_t {
+	atomic64_t data[MWINDOW_SIZE + 1];
+} __attribute__ ((packed));
+
+/*}}}*/
+static inline void init_mwindow_t (mwindow_t *w) /*{{{*/
+{
+	int i;
+
+	for (i=0; i < (MWINDOW_SIZE + 1); i++) {
+		if (i == MWINDOW_STATE) {
+			att64_init (&(w->data[i]), (uint64_t)0);
+		} else {
+			att64_init (&(w->data[i]), (uint64_t)NULL);
+		}
+	}
+}
+
+/*}}}*/
+
+
+/*{{{  tqnode_t: timer-queue node*/
+
+struct TAG_tqnode_t {
+	uint64_t time;
+	tqnode_t *next;
+	tqnode_t *prev;
+
+	pbatch_t *bnext;		/* must match 'nb' in pbatch_t */
+	atomic64_t state;		/* must match 'state' in pbatch_t */
+
+	psched_t *scheduler;
+	workspace_t wptr;
+
+} __attribute__ ((packed));
+
+/*}}}*/
+static inline void init_tqnode_t (tqnode_t *t) /*{{{*/
+{
+	t->time = 0;
+	t->next = NULL;
+	t->prev = NULL;
+
+	/* NOTE: don't need to set bnext or state */
+
+	t->scheduler = NULL;
+	t->wptr = NULL;
+}
+
+/*}}}*/
+
+
+/*{{{  scheduler sync flags (for psched_t.sync)*/
+
 #define SYNC_INTR_BIT	1
 #define SYNC_TIME_BIT	2
 #define SYNC_BMAIL_BIT	4
@@ -145,43 +279,119 @@ static inline void reinit_pbatch_t (pbatch_t *b) /*{{{*/
 #define SYNC_TIME	(1 << SYNC_TIME_BIT)
 #define SYNC_BMAIL	(1 << SYNC_BMAIL_BIT)
 #define SYNC_PMAIL	(1 << SYNC_PMAIL_BIT)
+#define SYNC_MAIL	(SYNC_BMAIL | SYNC_PMAIL)
 #define SYNC_WORK	(1 << SYNC_WORK_BIT)
 #define SYNC_TQ		(1 << SYNC_TQ_BIT)
 
-typedef struct TAG_psched_t {		/* scheduler structure */
-	workspace_t fptr;		/* run-queue for this scheduler */
-	workspace_t bptr;
 
-	workspace_t tptr;		/* timer-queue for this scheduler */
-
-	pbatch_t *cbch;			/* current batch (also priofinity) */
-	pbatch_t *fbch;			/* batch queue */
-	pbatch_t *bbch;
-
-	/* offset +48 */
-	void *saved_sp;			/* saved C state */
+/*}}}*/
+/*{{{  psched_t: per-scheduler-thread state*/
+struct TAG_psched_t {
+	/* offset +0 */
+	void *saved_sp;				/* saved C state: must stay here */
 	void *saved_bp;
 	void *saved_r10;
 	void *saved_r11;
 
-	slick_t *sptr;			/* pointer to global state */
-	int32_t sidx;			/* which particular RT thread we are [0..] */
+	/* scheduler constants */
+	int32_t sidx;				/* which particular thread we are */
 	int32_t dummy0;
+	bitset128_t id;				/* 1 << sidx */
 
-	int32_t signal_in;		/* sleep/wake-up pipe FDs */
+	int32_t signal_in;			/* sleep/wake-up pipe FDs */
 	int32_t signal_out;
 
-	atomic32_t sync;
-	int32_t dummy1;
-} __attribute__ ((packed)) psched_t;
+	uint64_t spin;
+	slick_t *sptr;				/* pointer to global state */
 
-typedef struct TAG_slickts_t {
-	int thridx;			/* thread index */
+	uint64_t dummy1[CACHELINE_LWORDS] CACHELINE_ALIGN;
+	
+	/* local scheduler state */
+	int64_t dispatches CACHELINE_ALIGN;
+	uint64_t priofinity;
+	uint64_t loop;
+	atomic64_t rqstate;
+
+	pbatch_t *free;
+	pbatch_t *laundry;
+
+	tqnode_t *tq_fptr;
+	tqnode_t *tq_bptr;
+
+	pbatch_t cbch CACHELINE_ALIGN;		/* current batch */
+	runqueue_t rq[MAX_PRIORITY_LEVELS];
+	uint64_t dummy2[CACHELINE_LWORDS];
+
+	/* globally accessed scheduler state */
+	atomic32_t sync CACHELINE_ALIGN;
+	int32_t dummy3;
+	uint64_t dummy4[CACHELINE_LWORDS] CACHELINE_ALIGN;
+
+	runqueue_t bmail CACHELINE_ALIGN;	/* batch mail */
+	uint64_t dummy5[CACHELINE_LWORDS] CACHELINE_ALIGN;
+
+	runqueue_t pmail CACHELINE_ALIGN;	/* process mail */
+	uint64_t dummy7[CACHELINE_LWORDS] CACHELINE_ALIGN;
+
+	atomic64_t mwstate CACHELINE_ALIGN;	/* migration window state */
+	uint64_t dummy8[CACHELINE_LWORDS] CACHELINE_ALIGN;
+
+	mwindow_t mw[MAX_PRIORITY_LEVELS];	/* migration windows */
+
+} __attribute__ ((packed));
+
+
+/*}}}*/
+static inline void init_psched_t (psched_t *s) /*{{{*/
+{
+	int i;
+
+	s->sidx = -1;
+	bis128_init (&(s->id), 0);
+	s->signal_in = -1;
+	s->signal_out = -1;
+	s->spin = 0;
+	s->sptr = NULL;
+
+	s->dispatches = 0;
+	s->priofinity = 0;
+	s->loop = 0;
+	att64_init (&(s->rqstate), 0);
+
+	s->free = NULL;
+	s->laundry = NULL;
+
+	s->tq_fptr = NULL;
+	s->tq_bptr = NULL;
+
+	init_pbatch_t (&(s->cbch));
+
+	for (i=0; i<MAX_PRIORITY_LEVELS; i++) {
+		init_runqueue_t (&(s->rq[i]));
+	}
+
+	att32_init (&(s->sync), 0);
+	
+	init_runqueue_t (&(s->bmail));
+	init_runqueue_t (&(s->pmail));
+
+	att64_init (&(s->mwstate), 0);
+	for (i=0; i<MAX_PRIORITY_LEVELS; i++) {
+		init_mwindow_t (&(s->mw[i]));
+	}
+}
+/*}}}*/
+/*{{{  slickts_t: startup data for threads*/
+struct TAG_slickts_t {
+	int thridx;				/* thread index */
 	slick_t *sptr;
 
-	void *initial_ws;		/* pointers to workspace and code */
+	void *initial_ws;			/* pointers to workspace and code */
 	void (*initial_proc)(void);
-} __attribute__ ((packed)) slickts_t;				/* used during thread start-up */
+} __attribute__ ((packed));			/* used during thread start-up */
+
+
+/*}}}*/
 
 #endif	/* !__SLICK_TYPES_H */
 
