@@ -24,6 +24,10 @@
 /* global scheduler structure */
 extern slick_ss_t slickss;
 
+/* in sched.c */
+extern uint64_t sched_time_now (void);
+extern void slick_wake_thread (psched_t *s, unsigned int sync_bit);
+
 
 #endif	/* !__SLICK_PRIV_H */
 

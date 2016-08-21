@@ -13,4 +13,5 @@ Based on the single-core CCSP scheduler from KRoC:
 
 Portions based on the OFA schedulers from KRoC:
 	David Wood
+	David Beckett
 	Peter Welch

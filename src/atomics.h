@@ -45,6 +45,7 @@
 #define memory_barrier() __asm__ __volatile__ ("mfence\n" : : : "memory");
 #define read_barrier() __asm__ __volatile__ ("lfence\n" : : : "memory");
 #define write_barrier() __asm__ __volatile__ ("sfence\n" : : : "memory");
+#define compiler_barrier() __asm__ __volatile__ ("" : : : "memory");
 
 static INLINE void serialise (void) /*{{{ : strongest barrier */
 {
@@ -420,6 +421,12 @@ static INLINE void att64_unsafe_clear_bit (atomic64_t *atval, unsigned int bit) 
 }
 /*}}}*/
 
+static INLINE void bis128_copy (bitset128_t *dst, bitset128_t *src) /*{{{*/
+{
+	att64_set ((atomic64_t *)&(dst->values[0]), att64_val ((atomic64_t *)&(src->values[0])));
+	att64_set ((atomic64_t *)&(dst->values[1]), att64_val ((atomic64_t *)&(src->values[1])));
+}
+/*}}}*/
 static INLINE uint64_t bis128_val_hi (bitset128_t *bs) /*{{{*/
 {
 	return att64_val ((atomic64_t *)&(bs->values[1]));
@@ -428,6 +435,20 @@ static INLINE uint64_t bis128_val_hi (bitset128_t *bs) /*{{{*/
 static INLINE uint64_t bis128_val_lo (bitset128_t *bs) /*{{{*/
 {
 	return att64_val ((atomic64_t *)&(bs->values[0]));
+}
+/*}}}*/
+static INLINE unsigned int bis128_isbitset (bitset128_t *bs, unsigned int bit) /*{{{*/
+{
+	unsigned int idx = bit >> 6;
+	uint64_t v = att64_val ((atomic64_t *)&(bs->values[idx]));
+
+	if (idx) {
+		bit -= 64;
+	}
+	if (v & (1ULL << bit)) {
+		return 1;
+	}
+	return 0;
 }
 /*}}}*/
 static INLINE void bis128_set_hi (bitset128_t *bs, uint64_t val) /*{{{*/
@@ -466,9 +487,9 @@ static INLINE void bis128_clear_bit (bitset128_t *bs, unsigned int bit) /*{{{*/
 /*}}}*/
 static INLINE unsigned int bis128_bsf (bitset128_t *bs) /*{{{*/
 {
-	unsigned int res;
+	uint64_t res;
 
-	res = 64;
+	// res = 64;
 	if (!bs->values[0]) {
 		if (!bs->values[1]) {
 			return 128;
@@ -479,7 +500,7 @@ static INLINE unsigned int bis128_bsf (bitset128_t *bs) /*{{{*/
 			: "r" (bs->values[1])
 			: "cc"
 			);
-		return (res + 64);
+		return ((unsigned int)res + 64);
 	}
 	__asm__ __volatile__ ("			\n"
 		"	bsfq %1, %0		\n"
@@ -487,7 +508,13 @@ static INLINE unsigned int bis128_bsf (bitset128_t *bs) /*{{{*/
 		: "r" (bs->values[0])
 		: "cc"
 		);
-	return res;
+	return (unsigned int)res;
+}
+/*}}}*/
+static INLINE unsigned int bis128_pick_random_bit (bitset128_t *bs) /*{{{*/
+{
+	/* FIXME: not terribly random! */
+	return bis128_bsf (bs);
 }
 /*}}}*/
 static INLINE void bis128_and (bitset128_t *s0, bitset128_t *s1, bitset128_t *d) /*{{{*/

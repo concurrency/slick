@@ -114,7 +114,10 @@ struct TAG_slick_ss_t {
 	bitset128_t idle_threads;
 	bitset128_t sleeping_threads;
 
+	psched_t *schedulers[MAX_RT_THREADS];
+
 	int32_t verbose;
+	int32_t ncpus;
 };
 
 /*}}}*/

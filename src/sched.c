@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <fcntl.h>
 #include <time.h>
 #include <errno.h>
@@ -50,7 +51,17 @@ static __thread psched_t psched;		/* per-thread scheduler structure */
 static void deadlock (void) __attribute__ ((noreturn));
 static void slick_schedule (psched_t *s) __attribute__ ((noreturn));
 
-static void enqueue (workspace_t w, psched_t *s);
+static void sched_setup_spin (psched_t *s);
+static void sched_enqueue (psched_t *s, workspace_t w);
+static void sched_allocate_to_free_list (psched_t *s, unsigned int count);
+static INLINE pbatch_t *sched_allocate_batch (psched_t *s);
+static INLINE void sched_new_current_batch (psched_t *s);
+static INLINE void sched_add_to_runqueue (psched_t *s, uint64_t priofinity, unsigned int rq_n, pbatch_t *bch);
+static INLINE void sched_add_affine_batch_to_runqueue (runqueue_t *rq, pbatch_t *bch);
+
+static void batch_enqueue_process (pbatch_t *bch, workspace_t w);
+
+static inline void runqueue_atomic_enqueue (runqueue_t *rq, int isws, void *ptr);
 
 extern void slick_schedlinkage (psched_t *s) __attribute__ ((noreturn));
 
@@ -63,6 +74,7 @@ void *slick_threadentry (void *arg)
 {
 	slickts_t *tinf = (slickts_t *)arg;
 	int fds[2];
+	int i;
 
 	memset (&psched, 0, sizeof (psched_t));
 
@@ -70,6 +82,7 @@ void *slick_threadentry (void *arg)
 
 	psched.sptr = tinf->sptr;
 	psched.sidx = tinf->thridx;
+	psched.priofinity = BuildPriofinity (0, (MAX_PRIORITY_LEVELS / 2));
 
 #if defined(SLICK_DEBUG) || defined(LOCAL_DEBUG)
 fprintf (stderr, "slick_threadentry(): here!  my thread id is %p, index %d\n", (void *)pthread_self (), psched.sidx);
@@ -90,13 +103,25 @@ fprintf (stderr, "slick_threadentry(): enqueue initial process at %p, entry-poin
 		return NULL;
 	}
 
+	sched_allocate_to_free_list (&psched, MAX_PRIORITY_LEVELS * 2);
+	for (i=0; i<MAX_PRIORITY_LEVELS; i++) {
+		psched.rq[i].pending = sched_allocate_batch (&psched);
+	}
+
+	sched_new_current_batch (&psched);
+
 	if (tinf->initial_ws && tinf->initial_proc) {
 		/* enqueue this process */
 		workspace_t iws = (workspace_t)tinf->initial_ws;
 
 		iws[LIPtr] = (uint64_t)tinf->initial_proc;
-		enqueue (iws, &psched);
+		iws[LPriofinity] = psched.priofinity;
+		sched_enqueue (&psched, iws);
 	}
+
+	slickss.schedulers[psched.sidx] = &psched;
+
+	sched_setup_spin (&psched);
 
 	bis128_set_bit (&slickss.enabled_threads, psched.sidx);
 	write_barrier ();
@@ -135,7 +160,7 @@ fprintf (stderr, "slick_safe_pause(): thread index %d about to resume after paus
 #endif
 }
 /*}}}*/
-static void slick_wake_thread (psched_t *s, unsigned int sync_bit) /*{{{*/
+void slick_wake_thread (psched_t *s, unsigned int sync_bit) /*{{{*/
 {
 	uint32_t data = 0;
 
@@ -152,6 +177,52 @@ static INLINE int64_t calculate_dispatches (uint64_t size) /*{{{*/
 	size |= (one_if_z64 (size, (~BATCH_MD_MASK)) - 1);
 	return (int64_t)(size & BATCH_MD_MASK);
 
+}
+/*}}}*/
+/*{{{  unsigned int sched_spin_us (void)*/
+/*
+ *	determines the spin-time for a scheduler, based on the number of CPUs
+ *	FIXME: preset and put in slickss
+ */
+unsigned int sched_spin_us (void)
+{
+	char *ch;
+	unsigned int ncpus;
+
+	if (slickss.ncpus < 2) {
+		return 0;
+	}
+
+	ch = getenv ("SLICKSCHEDULERSPIN");
+	if (ch) {
+		if (sscanf (ch, "%u", &ncpus) != 1) {
+			slick_warning ("sched_spin_us(): not using environment variable SLICKSCHEDULERSPIN, not integer [%s]", ch);
+		} else {
+			return ncpus;
+		}
+	}
+
+	return 16;
+}
+/*}}}*/
+/*{{{  static void sched_setup_spin (psched_t *s)*/
+/*
+ *	sets up the spin counter for a scheduler
+ */
+static void sched_setup_spin (psched_t *s)
+{
+	uint64_t start, end, ns;
+	int i = 10000;
+
+	start = sched_time_now ();
+	while (i--) {
+		idle_cpu ();
+	}
+
+	end = sched_time_now ();
+	ns = end - start;
+
+	psched.spin = (sched_spin_us () * 1000) / (ns ? ns : 1);
 }
 /*}}}*/
 
@@ -329,6 +400,87 @@ static INLINE void sched_load_current_batch (psched_t *s, pbatch_t *bch, int rem
 	}
 }
 /*}}}*/
+/*{{{  static void mail_process (uint64_t affinity, workspace_t w)*/
+/*
+ *	sends a process to another scheduler
+ */
+static void mail_process (uint64_t affinity, workspace_t w)
+{
+	bitset128_t targets;
+	unsigned int n;
+	psched_t *s;
+
+	if (!affinity) {
+		bis128_copy (&targets, &slickss.enabled_threads);
+	} else {
+		bis128_set_hi (&targets, 0);
+		bis128_set_lo (&targets, bis128_val_lo (&slickss.enabled_threads) & affinity);
+
+		if (!bis128_val_lo (&targets)) {
+			/* impossible: no such scheduler */
+			slick_fatal ("mail_process(): impossible affinity detected: 0x%16.16lx.", affinity);
+		}
+	}
+
+	n = bis128_pick_random_bit (&targets);
+	s = slickss.schedulers[n];
+
+	runqueue_atomic_enqueue (&(s->pmail), 1, w);
+	write_barrier ();
+	att32_set_bit (&(s->sync), SYNC_PMAIL_BIT);
+	read_barrier ();
+
+	if (bis128_isbitset (&slickss.sleeping_threads, s->sidx)) {
+		slick_wake_thread (s, SYNC_PMAIL_BIT);
+	}
+}
+/*}}}*/
+/*{{{  static void sched_enqueue_far_process (psched_t *s, uint64_t priofinity, workspace_t w)*/
+/*
+ *	enqueues a process elsewhere
+ */
+static void sched_enqueue_far_process (psched_t *s, uint64_t priofinity, workspace_t w)
+{
+	if (!PHasAffinity (priofinity)) {
+		int pri = PPriority (priofinity);
+		runqueue_t *rq = &(s->rq[pri]);
+
+		if (PHasAffinity (rq->priofinity)) {
+			sched_add_affine_batch_to_runqueue (rq, rq->pending);
+			rq->pending = sched_allocate_batch (s);
+		}
+
+		rq->priofinity = BuildPriofinity (0, 1);
+		batch_enqueue_process (rq->pending, w);
+
+		att64_unsafe_set_bit (&(s->rqstate), pri);
+		if (pri < PPriority (s->priofinity)) {
+			/* force new-batch pick next time */
+			s->dispatches = 0;
+		}
+	} else if ((PAffinity (priofinity) & bis128_val_lo (&s->id)) != 0) {		/* XXX: only handles affinity for low-order 59 threads */
+		/* affinity for this scheduler (and maybe others) */
+		int pri = PPriority (priofinity);
+		runqueue_t *rq = &(s->rq[pri]);
+
+		if (rq->priofinity && (PAffinity (rq->priofinity) != PAffinity (priofinity))) {
+			sched_add_to_runqueue (s, rq->priofinity, pri, rq->pending);
+			rq->pending = sched_allocate_batch (s);
+		}
+
+		rq->priofinity = priofinity;
+		batch_enqueue_process (rq->pending, w);
+
+		att64_unsafe_set_bit (&(s->rqstate), pri);
+		if (pri < PPriority (s->priofinity)) {
+			/* force new-batch pick next time */
+			s->dispatches = 0;
+		}
+	} else {
+		mail_process (PAffinity (priofinity), w);
+	}
+}
+/*}}}*/
 
 /*{{{  static INLINE void batch_enqueue_hint (pbatch_t *bch, workspace_t w, int isempty)*/
 /*
@@ -366,19 +518,18 @@ static void batch_enqueue_process (pbatch_t *bch, workspace_t w)
 	bch->size++;
 }
 /*}}}*/
-/*{{{  static void enqueue (workspace_t w, psched_t *s)*/
+/*{{{  static void sched_enqueue (psched_t *s, workspace_t w)*/
 /*
  *	enqueues a process
  */
-static void enqueue (workspace_t w, psched_t *s)
+static void sched_enqueue (psched_t *s, workspace_t w)
 {
 	uint64_t priofinity = w[LPriofinity];
 
 	if (s->priofinity == priofinity) {
 		batch_enqueue_process (&(s->cbch), w);
 	} else {
-		// enqueue_far_process (w, s, priofinity);
-		slick_fatal ("unimplemented in enqueue()");
+		sched_enqueue_far_process (s, priofinity, w);
 	}
 }
 /*}}}*/
@@ -408,11 +559,11 @@ static workspace_t batch_dequeue_process (pbatch_t *bch)
 	return tmp;
 }
 /*}}}*/
-/*{{{  static workspace_t dequeue (psched_t *s)*/
+/*{{{  static workspace_t sched_dequeue (psched_t *s)*/
 /*
  *	dequeues a process from the current scheduler's batch
  */
-static workspace_t dequeue (psched_t *s)
+static workspace_t sched_dequeue (psched_t *s)
 {
 	return batch_dequeue_process (&(s->cbch));
 }
@@ -426,6 +577,7 @@ static INLINE int sched_isbatchend (psched_t *s)
 	return ((s->dispatches < 0) || (s->cbch.fptr == NULL));
 }
 /*}}}*/
+
 /*{{{  static INLINE int batch_empty (pbatch_t *b)*/
 /*
  *	determines whether a particular batch is empty
@@ -460,6 +612,89 @@ static void batch_verify_integrity (pbatch_t *bch)
 	}
 }
 /*}}}*/
+
+/*{{{  static inline void runqueue_atomic_enqueue (runqueue_t *rq, int isws, void *ptr)*/
+/*
+ *	atomically adds a process or batch to a run-queue
+ */
+static inline void runqueue_atomic_enqueue (runqueue_t *rq, int isws, void *ptr)
+{
+	void *back;
+
+	if (isws) {
+		att64_set ((atomic64_t *)&(((workspace_t)ptr)[LLink]), (uint64_t)NULL);
+	} else {
+		att64_set ((atomic64_t *)&(((pbatch_t *)ptr)->nb), (uint64_t)NULL);
+	}
+
+	write_barrier ();
+
+	back = (void *)att64_swap ((atomic64_t *)&(rq->bptr), (uint64_t)ptr);
+
+	if (!back) {
+		att64_set ((atomic64_t *)&(rq->fptr), (uint64_t)ptr);
+	} else if (isws) {
+		att64_set ((atomic64_t *)&(((workspace_t)back)[LLink]), (uint64_t)ptr);
+	} else {
+		att64_set ((atomic64_t *)&(((pbatch_t *)back)->nb), (uint64_t)ptr);
+	}
+}
+/*}}}*/
+/*{{{  static inline void *runqueue_atomic_dequeue (runqueue_t *rq, int isws)*/
+/*
+ *	atomically removes a process or batch from a run-queue's batch
+ */
+static inline void *runqueue_atomic_dequeue (runqueue_t *rq, int isws)
+{
+	void *ptr = (void *)att64_val ((atomic64_t *)&(rq->fptr));
+
+	if (ptr) {
+		void *next;
+
+		if (ptr == (void *)att64_val ((atomic64_t *)&(rq->bptr))) {
+			/* last thing in the queue, CAS it out */
+			if (att64_cas ((atomic64_t *)&(rq->fptr), (uint64_t)ptr, (uint64_t)NULL)) {
+				/* succeeded in swapping in NULL for ptr */
+
+				att64_cas ((atomic64_t *)&(rq->bptr), (uint64_t)ptr, (uint64_t)NULL);
+				/* Note: this must be CAS'd in, should we race with something that sees NULL and sets fptr/bptr */
+
+				if (isws) {
+					att64_set ((atomic64_t *)&(((workspace_t)ptr)[LLink]), ~((uint64_t)NULL));
+				} else {
+					att64_set ((atomic64_t *)&(((pbatch_t *)ptr)->nb), (uint64_t)-1);
+				}
+
+				return ptr;
+			}
+			read_barrier ();
+		}
+
+		if (isws) {
+			next = (void *)att64_val ((atomic64_t *)&(((workspace_t)ptr)[LLink]));
+		} else {
+			next = (void *)att64_val ((atomic64_t *)&(((pbatch_t *)ptr)->nb));
+		}
+
+		/* XXX: frmb note to check: better not have two threads trying to dequeue here? */
+		if (next) {
+			att64_set ((atomic64_t *)&(rq->fptr), (uint64_t)next);
+			write_barrier ();
+
+			if (isws) {
+				att64_set ((atomic64_t *)&(((workspace_t)ptr)[LLink]), ~((uint64_t)NULL));
+			} else {
+				att64_set ((atomic64_t *)&(((pbatch_t *)ptr)->nb), (uint64_t)-1);
+			}
+
+			return ptr;
+		}
+	}
+
+	return NULL;
+}
+/*}}}*/
+
 /*{{{  static INLINE void sched_add_to_local_runqueue (runqueue_t *rq, pbatch_t *bch)*/
 /*
  *	attaches a batch to the relevant run-queue
@@ -645,7 +880,7 @@ static INLINE void sched_push_current_batch (psched_t *s)
 		/* split batch */
 		pbatch_t *nb = sched_allocate_batch (s);
 
-		batch_enqueue_hint (nb, dequeue (s), 1);
+		batch_enqueue_hint (nb, sched_dequeue (s), 1);
 		sched_push_batch (s, s->priofinity, nb);
 	}
 	sched_push_batch (s, s->priofinity, sched_save_current_batch (s));
@@ -673,6 +908,283 @@ static INLINE pbatch_t *sched_pick_batch (psched_t *s, unsigned int rq_n)
 }
 /*}}}*/
 
+/*{{{  uint64_t sched_time_now (void)*/
+/*
+ *	reads the current time (uses POSIX clock)
+ */
+uint64_t sched_time_now (void)
+{
+	struct timespec ts;
+
+	if (clock_gettime (CLOCK_MONOTONIC_COARSE, &ts) != 0) {
+		slick_fatal ("sched_time_now(): clock_gettime() failed with: %s", strerror (errno));
+		return 0;
+	}
+	return (((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec);
+}
+/*}}}*/
+/*{{{  static INLINE void sched_time_settimeoutn (psched_t *s, uint64_t now, uint64_t timeout)*/
+/*
+ *	sets up a particular timeout (timeout) based on current time (now)
+ */
+static INLINE void sched_time_settimeoutn (psched_t *s, uint64_t now, uint64_t timeout)
+{
+	uint64_t nsecs = timeout - now;
+	struct itimerval itv;
+	int ret;
+	uint64_t next_alarm;
+
+	getitimer (ITIMER_REAL, &itv);
+	next_alarm = (((uint64_t)itv.it_value.tv_sec * 1000000ULL) + (uint64_t)itv.it_value.tv_usec) * 1000ULL;
+
+	while (nsecs && (!next_alarm || (next_alarm > nsecs))) {
+		itv.it_interval.tv_sec = 0;
+		itv.it_interval.tv_usec = 0;
+		itv.it_value.tv_sec = (uint32_t)(nsecs / 1000000000ULL);
+		itv.it_value.tv_usec = (uint32_t)((nsecs % 1000000000ULL) / 1000ULL);
+
+		ret = setitimer (ITIMER_REAL, &itv, &itv);
+		if (ret < 0) {
+			slick_fatal ("sched_time_settimeoutn(): setitimer() failed with [%s]", strerror (errno));
+		}
+
+		next_alarm = nsecs;
+		nsecs = (((uint64_t)itv.it_value.tv_sec * 1000000ULL) + (uint64_t)itv.it_value.tv_usec) * 1000ULL;
+	}
+}
+/*}}}*/
+/*{{{  static INLINE void sched_time_settimeout (psched_t *s, uint64_t time)*/
+/*
+ *	sets the next timeout
+ */
+static INLINE void sched_time_settimeout (psched_t *s, uint64_t time)
+{
+	uint64_t now = sched_time_now ();
+
+	if (time > now) {
+		sched_time_settimeoutn (s, now, time);
+	} else {
+		sched_time_settimeoutn (s, now, now + 1);
+	}
+}
+/*}}}*/
+
+/*{{{  static INLINE void sched_setup_tqnode (tqnode_t *tn, workspace_t wptr, uint64_t time, int alt)*/
+/*
+ *	initialises a timer-queue node with workspace pointer and timeout, low-order bit set if alt (and batch dirty bit)
+ */
+static INLINE void sched_setup_tqnode (tqnode_t *tn, workspace_t wptr, uint64_t time, int alt)
+{
+	tn->wptr = (workspace_t)((uint64_t)wptr | (uint64_t)alt);
+	tn->time = time;
+
+	batch_set_dirty_value ((pbatch_t *)tn, (uint64_t)alt);
+}
+/*}}}*/
+/*{{{  static INLINE tqnode_t *sched_init_tqnode (psched_t *s, workspace_t wptr, uint64_t time, int alt)*/
+/*
+ *	allocates and initialises a new timer-queue node
+ */
+static INLINE tqnode_t *sched_init_tqnode (psched_t *s, workspace_t wptr, uint64_t time, int alt)
+{
+	tqnode_t *tn = (tqnode_t *)sched_allocate_batch (s);
+
+	sched_setup_tqnode (tn, wptr, time, alt);
+	tn->scheduler = s;
+
+	return tn;
+}
+/*}}}*/
+/*{{{  static INLINE void sched_release_tqnode (psched_t *s, tqnode_t *tn)*/
+/*
+ *	frees a timer-queue node
+ */
+static INLINE void sched_release_tqnode (psched_t *s, tqnode_t *tn)
+{
+	sched_release_batch (s, (pbatch_t *)tn);
+}
+/*}}}*/
+/*{{{  static inline tqnode_t *sched_insert_tqnode (psched_t *s, tqnode_t *node, int before, workspace_t wptr, uint64_t time, int alt)*/
+/*
+ *	inserts a new timer-queue node into the list of existing nodes (s->tq_[fb]ptr).
+ *	returns new node.
+ */
+static inline tqnode_t *sched_insert_tqnode (psched_t *s, tqnode_t *node, int before, workspace_t wptr, uint64_t time, int alt)
+{
+	tqnode_t *tn;
+
+	if (node->wptr || batch_isdirty ((pbatch_t *)node)) {
+		/* insert new node */
+		tn = sched_init_tqnode (s, wptr, time, alt);
+		if (before) {
+			/* before current */
+			tn->next = node;
+			tn->prev = node->prev;
+			if (!node->prev) {
+				/* front of queue */
+				s->tq_fptr = tn;
+				sched_time_settimeout (s, tn->time);
+			} else {
+				tn->prev->next = tn;
+			}
+			node->prev = tn;
+		} else {
+			/* after current */
+			tn->next = node->next;
+			if (!node->next) {
+				/* end of queue */
+				s->tq_bptr = tn;
+			} else {
+				tn->next->prev = tn;
+			}
+			node->next = tn;
+			tn->prev = node;
+		}
+	} else {
+		/* node->wptr == NULL and node is clean -- reuse it */
+		tn = node;
+		sched_setup_tqnode (tn, wptr, time, alt);
+		if (!tn->prev) {
+			sched_time_settimeout (s, tn->time);
+		}
+	}
+
+	return tn;
+}
+/*}}}*/
+/*{{{  static inline void sched_delete_tqnode (psched_t *s, tqnode_t *tn)*/
+/*
+ *	removes a timer-queue node from the in-scheduler list
+ */
+static inline void sched_delete_tqnode (psched_t *s, tqnode_t *tn)
+{
+	if (!tn->prev) {
+		/* front of queue */
+		s->tq_fptr = tn->next;
+		if (!tn->next) {
+			/* back of queue */
+			s->tq_bptr = NULL;
+		} else {
+			/* not back of queue */
+			s->tq_fptr->prev = NULL;
+			sched_time_settimeout (s, s->tq_fptr->time);
+		}
+	} else {
+		/* not front of queue */
+		tn->prev->next = tn->next;
+
+		if (!tn->next) {
+			/* back of queue */
+			s->tq_bptr = tn->prev;
+		} else {
+			/* not back of queue */
+			tn->next->prev = tn->prev;
+		}
+	}
+}
+/*}}}*/
+/*{{{  static INLINE void sched_trigger_alt_guard (psched_t *s, uint64_t val)*/
+/*
+ *	called when we're doing channel I/O and we find something ALTy in there
+ */
+static INLINE void sched_trigger_alt_guard (psched_t *s, uint64_t val)
+{
+	workspace_t other = (workspace_t)(val & ~1);
+	uint64_t state, nstate;
+
+	do {
+		state = att64_val ((atomic64_t *)&(other[LState]));
+		nstate = (state - 1) & (~(ALT_NOT_READY | ALT_WAITING));		/* decrement guard count, clear NOT_READY and WAITING flags */
+	} while (!att64_cas ((atomic64_t *)&(other[LState]), state, nstate));
+
+	if ((state & ALT_WAITING) || (nstate == 0)) {
+		sched_enqueue (s, other);
+	}
+}
+/*}}}*/
+/*{{{  static inline void sched_clean_timer_queue (psched_t *s)*/
+/*
+ *	cleans the timer queue, removing timer-queue nodes that have been dealt with
+ */
+static inline void sched_clean_timer_queue (psched_t *s)
+{
+	tqnode_t *tn = s->tq_fptr;
+
+	while (tn) {
+		if (tn->wptr == NULL) {
+			tqnode_t *next = tn->next;
+
+			sched_delete_tqnode (s, tn);
+			batch_set_clean ((pbatch_t *)tn);
+			tn = next;
+		} else {
+			tn = tn->next;
+		}
+	}
+}
+/*}}}*/
+/*{{{  static inline void sched_walk_timer_queue (psched_t *s)*/
+/*
+ *	walks along a non-empty timer-queue checking for expired timeouts
+ */
+static inline void sched_walk_timer_queue (psched_t *s)
+{
+	tqnode_t *tn = s->tq_fptr;
+	uint64_t now = sched_time_now ();
+
+	do {
+		if (!tn->wptr || (tn->time <= now)) {
+			/* expired */
+			uint64_t ptr = att64_val ((atomic64_t *)&(tn->wptr));
+			tqnode_t *next = tn->next;
+
+			if ((ptr != (uint64_t)NULL) && !(ptr & 1)) {
+				/* not an ALT, simply reschedule */
+				tn->wptr[LTimef] = now;
+
+				sched_enqueue (s, tn->wptr);
+				sched_release_tqnode (s, tn);
+			} else {
+				if (ptr != (uint64_t)NULL) {
+					/* challenge ALT */
+					tn->time = now;
+					write_barrier ();
+
+					ptr = att64_swap ((atomic64_t *)&(tn->wptr), (uint64_t)NULL);
+					if (ptr != (uint64_t)NULL) {
+						sched_trigger_alt_guard (s, ptr);
+					}
+					compiler_barrier ();
+				}
+				batch_set_clean ((pbatch_t *)tn);
+			}
+			tn = next;
+		} else {
+			/* valid node, becomes new head */
+			tn->prev = NULL;
+			s->tq_fptr = tn;
+			sched_time_settimeoutn (s, now, tn->time);
+			return;
+		}
+	} while (tn);
+
+	/* if we get here, timer queue is empty */
+	s->tq_fptr = NULL;
+	s->tq_bptr = NULL;
+}
+
+/*}}}*/
+/*{{{  static INLINE void sched_check_timer_queue (psched_t *s)*/
+/*
+ *	checks the timer-queue for expired timeouts
+ */
+static INLINE void sched_check_timer_queue (psched_t *s)
+{
+	if (s->tq_fptr) {
+		sched_walk_timer_queue (s);
+	}
+}
+/*}}}*/
 
 /*{{{  static void slick_schedule (psched_t *s)*/
 /*
@@ -687,7 +1199,32 @@ static void slick_schedule (psched_t *s)
 			uint32_t sync = att32_swap (&(s->sync), 0);
 
 			if (sync & SYNC_TIME) {
-				/*  FIXME: check timer queue */
+				sched_check_timer_queue (s);
+			}
+
+			while (sync & SYNC_BMAIL) {
+				pbatch_t *bch = (pbatch_t *)runqueue_atomic_dequeue (&(s->bmail), 0);
+
+				if (bch) {
+					sched_push_batch (s, bch->priofinity, bch);
+				} else {
+					sync &= ~SYNC_BMAIL;
+				}
+			}
+
+			while (sync & SYNC_PMAIL) {
+				workspace_t ptr = (workspace_t)runqueue_atomic_dequeue (&(s->pmail), 1);
+
+				if (ptr) {
+					sched_enqueue (s, ptr);
+				} else {
+					sync &= SYNC_PMAIL;
+				}
+			}
+
+			if (sync & SYNC_TQ) {
+				sched_clean_timer_queue (s);
+				sched_check_timer_queue (s);
 			}
 
 		}
@@ -700,7 +1237,7 @@ static void slick_schedule (psched_t *s)
 				s->dispatches = calculate_dispatches (size);
 				s->cbch.size = size;
 
-				w = dequeue (s);
+				w = sched_dequeue (s);
 			} else {
 				uint64_t tmp;
 				pbatch_t *nb = NULL;
@@ -715,26 +1252,33 @@ static void slick_schedule (psched_t *s)
 					unsigned int rq;
 
 					tmp = att64_val (&(s->rqstate));
+					if (!tmp) {
+						break;
+					}
 					rq = bsf64 (tmp);
 					nb = sched_pick_batch (s, rq);
 				}
 
 				if (nb) {
 					/* got a new batch of processes to schedule :) */
-					/* FIXME: maybe wake another thread if migration available */
+					unsigned int sidx = bis128_bsf (&slickss.sleeping_threads);
+
+					if (att64_val (&(s->mwstate)) && (sidx < 128)) {
+						slick_wake_thread (slickss.schedulers[sidx], SYNC_WORK_BIT);
+					}
 
 					if (batch_isdirty (nb)) {
 						slick_fatal ("slick_schedule(): s=%p, unclean batch at %p", s, nb);
 					}
 					sched_load_current_batch (s, nb, 0);
-					w = dequeue (s);
+					w = sched_dequeue (s);
 
-					/* ELSE: if we can migrate some work from elsewhere, do so */
+					/* FIXME: ELSE: if we can migrate some work from elsewhere, do so */
 				} else {
 					sched_new_current_batch (s);
 
 					if ((s->loop & 0x0f) == 0) {
-						/* FIXME: some tidying up please */
+						sched_clean_timer_queue (s);
 						sched_do_laundry (s);
 						sched_release_excess_memory (s);
 					}
@@ -750,7 +1294,7 @@ static void slick_schedule (psched_t *s)
 
 						if (s->tq_fptr != NULL) {
 							slick_safe_pause (s);
-							/* FIXME: check timer queue */
+							sched_check_timer_queue (s);
 						} else if (!att32_val (&(s->sync))) {
 							bitset128_t idle;
 
@@ -778,7 +1322,7 @@ static void slick_schedule (psched_t *s)
 			}
 
 		} else {
-			w = dequeue (s);
+			w = sched_dequeue (s);
 		}
 
 	} while (w == NULL);
@@ -828,25 +1372,6 @@ void os_shutdown (workspace_t w)
 #define CIO_OUTPUT	(0x00000002)
 
 /*}}}*/
-/*{{{  static INLINE void trigger_alt_guard (uint64_t val)*/
-/*
- *	called when we're doing channel I/O and we find something ALTy in there
- */
-static INLINE void trigger_alt_guard (uint64_t val)
-{
-	workspace_t other = (workspace_t)(val & ~1);
-	uint64_t state, nstate;
-
-	do {
-		state = att64_val ((atomic64_t *)&(other[LState]));
-		nstate = (state - 1) & (~(ALT_NOT_READY | ALT_WAITING));		/* decrement guard count, clear NOT_READY and WAITING flags */
-	} while (!att64_cas ((atomic64_t *)&(other[LState]), state, nstate));
-
-	if ((state & ALT_WAITING) || (nstate == 0)) {
-		enqueue (other, &psched);
-	}
-}
-/*}}}*/
 /*{{{  static INLINE void channel_io (const int flags, workspace_t w, void **chanptr, void *addr, const int count, uint64_t raddr)*/
 /*
  *	channel communication -- both ways.  This gets inlined and, hopefully, gcc optimises away everything
@@ -878,7 +1403,7 @@ static INLINE void channel_io (const int flags, workspace_t w, void **chanptr, v
 			slick_schedule (&psched);
 		} else if ((uint64_t)chanval & 1) {
 			/* something ALTy in the channel, but we're there now */
-			trigger_alt_guard ((uint64_t)chanval);
+			sched_trigger_alt_guard (&psched, (uint64_t)chanval);
 			slick_schedule (&psched);
 		}
 		/* else, something arrived in the channel along the way, so go with it */
@@ -914,7 +1439,7 @@ static INLINE void channel_io (const int flags, workspace_t w, void **chanptr, v
 	*chanptr = NULL;			/* write barrier will make sure this goes first */
 	// att64_set ((atomic64_t *)chanptr, (uint64_t)NULL);
 	write_barrier ();
-	enqueue (other, &psched);
+	sched_enqueue (&psched, other);
 	return;
 }
 /*}}}*/
@@ -977,7 +1502,7 @@ void os_chanoutv64 (workspace_t w, void **chanptr, const uint64_t val)
 	*chanptr = NULL;
 
 	write_barrier ();
-	enqueue (other, &psched);
+	sched_enqueue (&psched, other);
 }
 /*}}}*/
 /*{{{  void os_runp (workspace_t w, workspace_t other)*/
@@ -986,7 +1511,7 @@ void os_chanoutv64 (workspace_t w, void **chanptr, const uint64_t val)
  */
 void os_runp (workspace_t w, workspace_t other)
 {
-	enqueue (other, &psched);
+	sched_enqueue (&psched, other);
 }
 /*}}}*/
 /*{{{  void os_stopp (workspace_t w)*/
@@ -1014,7 +1539,7 @@ void os_startp (workspace_t w, workspace_t other, void *entrypoint)
 	other[LIPtr] = (uint64_t)entrypoint;
 	other[LPriofinity] = psched.priofinity;
 
-	enqueue (other, &psched);
+	sched_enqueue (&psched, other);
 }
 /*}}}*/
 /*{{{  void os_endp (workspace_t w, workspace_t other)*/
@@ -1029,7 +1554,7 @@ void os_endp (workspace_t w, workspace_t other)
 		other[LPriofinity] = other[LSavedPri];
 		other[LIPtr] = other[LIPtrSucc];
 
-		enqueue (other, &psched);
+		sched_enqueue (&psched, other);
 	}
 	/* else we were not the last -- reschedule */
 	slick_schedule (&psched);

@@ -41,6 +41,7 @@
 #include "slick.h"
 #include "atomics.h"
 #include "slick_types.h"
+#include "slick_priv.h"
 #include "sutil.h"
 
 extern void *slick_threadentry (void *arg);
@@ -66,7 +67,14 @@ slick_ss_t slickss;
  */
 static void slick_sigalrm (int sig)
 {
-	/* FIXME! */
+	/* signal all enabled threads */
+	int i;
+
+	for (i=0; i<slick.rt_nthreads; i++) {
+		slick_wake_thread (slickss.schedulers[i], SYNC_TIME_BIT);
+	}
+
+	signal (SIGALRM, slick_sigalrm);
 }
 /*}}}*/
 /*{{{  static void slick_sig_fatal (int sig)*/
@@ -102,6 +110,7 @@ static void slick_sigfpe (int sig)
 int slick_init (const char **argv, const int argc)
 {
 	char *ch;
+	int i;
 
 	memset (&slick, 0, sizeof (slick_t));
 	memset (&slickss, 0, sizeof (slick_ss_t));
@@ -198,7 +207,7 @@ int slick_init (const char **argv, const int argc)
 	}
 
 	if (slick.rt_nthreads == 0) {
-		/*{{{  see if number of CPUs is in the environment (SLICKRTNTHREADS)*/
+		/*{{{  see if number of run-time threads is in the environment (SLICKRTNTHREADS)*/
 		ch = getenv ("SLICKRTNTHREADS");
 		if (ch) {
 			if (sscanf (ch, "%d", &slick.rt_nthreads) != 1) {
@@ -210,8 +219,24 @@ int slick_init (const char **argv, const int argc)
 		/*}}}*/
 	}
 
+	/* find out how many (real/HT) processors we have, put in slickss.ncpus */
+	slickss.ncpus = 0;
+
+	if (slickss.ncpus == 0) {
+		/*{{{  see if the number of CPUS is in the environment (SLICKRTNCPUS)*/
+		ch = getenv ("SLICKRTNCPUS");
+		if (ch) {
+			if (sscanf (ch, "%d", &slickss.ncpus) != 1) {
+				slick_warning ("not using environment variable SLICKRTNCPUS, not an integer [%s]", ch);
+				slickss.ncpus = 0;		/* default */
+			}
+		}
+
+		/*}}}*/
+	}
+
 #ifdef _SC_NPROCESSORS_ONLN
-	if (slick.rt_nthreads == 0) {
+	if (slickss.ncpus == 0) {
 		/*{{{  try and figure out how many CPUs we have via sysconf*/
 		long nrt = sysconf (_SC_NPROCESSORS_ONLN);
 
@@ -221,13 +246,13 @@ int slick_init (const char **argv, const int argc)
 			slick_warning ("more CPUs (%d) online than MAX_RT_THREADS (%d)!", (int)nrt, MAX_RT_THREADS);
 			nrt = MAX_RT_THREADS;
 		}
-		slick.rt_nthreads = (int)nrt;
+		slickss.ncpus = (int32_t)nrt;
 
 		/*}}}*/
 	}
 #endif
 
-	if (slick.rt_nthreads == 0) {
+	if (slickss.ncpus == 0) {
 		/*{{{  try and figure out by reading /proc/cpuinfo*/
 		/*
 		 *	Note: this just counts up how many lines that look like "processor : NN"
@@ -290,10 +315,25 @@ int slick_init (const char **argv, const int argc)
 		munmap (maddr, (size_t)st_buf.st_size);
 		close (fd);
 
-		slick.rt_nthreads = cpucount;
+		slickss.ncpus = (int32_t)cpucount;
 		/*}}}*/
 	}
 skip_cpuinfo:
+
+	if (slick.rt_nthreads == 0) {
+		slick.rt_nthreads = slickss.ncpus;
+	}
+
+	if (slick.rt_nthreads > MAX_RT_THREADS) {
+		slick_warning ("more threads (%d) than MAX_RT_THREADS (%d)!", slick.rt_nthreads, MAX_RT_THREADS);
+		slick.rt_nthreads = MAX_RT_THREADS;
+	} else if (slick.rt_nthreads == 0) {
+		slick_fatal ("could not determine number of run-time threads (nor CPUs); please set SLICKRTNTHREADS and SLICKRTNCPUS.");
+	} else if (slickss.ncpus == 0) {
+		slick_fatal ("could not determine number of processors, please set SLICKRTNCPUS.");
+	}
+
+	/* Note: number of run-time threads may differ from number of CPUs */
 
 	if (slick.verbose) {
 		slick_message ("going to use %d run-time threads", slick.rt_nthreads);
@@ -305,6 +345,10 @@ skip_cpuinfo:
 	bis128_init (&(slickss.enabled_threads), 0);
 	bis128_init (&(slickss.idle_threads), 0);
 	bis128_init (&(slickss.sleeping_threads), 0);
+
+	for (i=0; i<MAX_RT_THREADS; i++) {
+		slickss.schedulers[i] = NULL;
+	}
 
 	return 0;
 }
@@ -345,10 +389,11 @@ void slick_startup (void *ws, void (*proc)(void))
 
 		if (!i) {
 			int count = 10;
-			struct timespec ts = {tv_sec: 0, tv_nsec: 10000000};		/* 10ms */
 
 			/* first thread is special, wait for it to set the enabled bit */
 			while (!(bis128_val_lo (&slickss.enabled_threads) & 1)) {
+				struct timespec ts = {tv_sec: 0, tv_nsec: 10000000};		/* 10ms */
+
 				sched_yield ();
 				nanosleep (&ts, NULL);
 				count--;
