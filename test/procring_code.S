@@ -27,9 +27,10 @@ o_procring_startup:
 	jmp	o_procring
 
 
-#define NPROCS		10485760
+#define NPROCS		10000000
 #define NPROCSP1	(NPROCS+1)
-#define REPORT		10
+#define NPREFIX		10000
+#define REPORT		(10 * NPREFIX)
 
 #define WSADJ		(64+(NPROCSP1 * 8))
 #define OFFS_A		(56+(NPROCSP1 * 8))
@@ -335,20 +336,38 @@ o_prefix:
 	subq	$16, %rbp
 
 	movq	$0, 8(%rbp)			/* initialise x = 0 */
+	movq	$NPREFIX, 0(%rbp)		/* initialise Temp = NPREFIX */
 
-.L1:
+.L101:
 	movq	%rbp, %rdi
 	movq	32(%rbp), %rsi
 	leaq	8(%rbp), %rdx
 	movl	$8, %ecx
 	call	os_chanout
 
+	/* a few reschedulings */
+	movq	%rbp, %rdi
+	call	os_pause
+
+	movq	%rbp, %rdi
+	call	os_pause
+
+	decq	0(%rbp)				/* Temp-- */
+	jnz	.L101
+
+.L1:
 	movq	%rbp, %rdi
 	movq	24(%rbp), %rsi
 	leaq	8(%rbp), %rdx
 	movl	$8, %ecx
 	call	os_chanin
 	
+	movq	%rbp, %rdi
+	movq	32(%rbp), %rsi
+	leaq	8(%rbp), %rdx
+	movl	$8, %ecx
+	call	os_chanout
+
 	jmp	.L1				/* loop forever */
 
 	addq	$16, %rbp

@@ -103,6 +103,18 @@ static INLINE unsigned int bsf64 (uint64_t v) /*{{{*/
 	return (unsigned int)r;
 }
 /*}}}*/
+static INLINE unsigned int bsr64 (uint64_t v) /*{{{*/
+{
+	uint64_t r = 64;
+
+	__asm__ __volatile__ ("				\n"
+			"	bsrq	%1, %0		\n"
+			: "=r" (r)
+			: "r" (v)
+			: "cc");
+	return (unsigned int)r;
+}
+/*}}}*/
 
 static INLINE unsigned int one_if_z64 (uint64_t val, uint64_t mask) /*{{{*/
 {
@@ -405,7 +417,7 @@ static INLINE void att64_clear_bit (atomic64_t *atval, unsigned int bit) /*{{{*/
 	__asm__ __volatile__ ("					\n"
 			"	lock; btrq %1, %0		\n"
 			: "+m" (__dummy_atomic64 (atval))
-			: "Ir" (bit)
+			: "Ir" ((uint64_t)bit)
 			: "cc"
 			);
 }
@@ -446,6 +458,14 @@ static INLINE unsigned int bis128_isbitset (bitset128_t *bs, unsigned int bit) /
 		bit -= 64;
 	}
 	if (v & (1ULL << bit)) {
+		return 1;
+	}
+	return 0;
+}
+/*}}}*/
+static INLINE int bis128_iszero (bitset128_t *bs) /*{{{*/
+{
+	if ((att64_val ((atomic64_t *)&(bs->values[0])) == 0) && (att64_val ((atomic64_t *)&(bs->values[1])) == 0)) {
 		return 1;
 	}
 	return 0;
@@ -521,6 +541,15 @@ static INLINE void bis128_and (bitset128_t *s0, bitset128_t *s1, bitset128_t *d)
 {
 	uint64_t lo = bis128_val_lo (s0) & bis128_val_lo (s1);
 	uint64_t hi = bis128_val_hi (s0) & bis128_val_hi (s1);
+
+	bis128_set_hi (d, hi);
+	bis128_set_lo (d, lo);
+}
+/*}}}*/
+static INLINE void bis128_andinv (bitset128_t *s0, bitset128_t *s1, bitset128_t *d) /*{{{*/
+{
+	uint64_t lo = bis128_val_lo (s0) & ~(bis128_val_lo (s1));
+	uint64_t hi = bis128_val_hi (s0) & ~(bis128_val_hi (s1));
 
 	bis128_set_hi (d, hi);
 	bis128_set_lo (d, lo);

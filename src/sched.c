@@ -518,6 +518,24 @@ static void batch_enqueue_process (pbatch_t *bch, workspace_t w)
 	bch->size++;
 }
 /*}}}*/
+/*{{{  static inline void batch_enqueue_process_front (pbatch_t *bch, workspace_t w)*/
+/*
+ *	enqueues a process to the front of a batch
+ */
+static inline void batch_enqueue_process_front (pbatch_t *bch, workspace_t w)
+{
+	w[LLink] = (uint64_t)bch->fptr;
+
+	if (w[LLink] == (uint64_t)NULL) {
+		bch->fptr = w;
+		bch->bptr = w;
+	} else {
+		bch->fptr = w;
+	}
+	bch->size++;
+}
+/*}}}*/
+
 /*{{{  static void sched_enqueue (psched_t *s, workspace_t w)*/
 /*
  *	enqueues a process
@@ -531,6 +549,15 @@ static void sched_enqueue (psched_t *s, workspace_t w)
 	} else {
 		sched_enqueue_far_process (s, priofinity, w);
 	}
+}
+/*}}}*/
+/*{{{  static INLINE void sched_enqueue_nopri (psched_t *s, workspace_t w)*/
+/*
+ *	enqueues a process on the current scheduler's batch, ignoring priority
+ */
+static INLINE void sched_enqueue_nopri (psched_t *s, workspace_t w)
+{
+	batch_enqueue_process (&(s->cbch), w);
 }
 /*}}}*/
 /*{{{  static workspace_t batch_dequeue_process (pbatch_t *bch)*/
@@ -907,6 +934,89 @@ static INLINE pbatch_t *sched_pick_batch (psched_t *s, unsigned int rq_n)
 	}
 }
 /*}}}*/
+/*{{{  static pbatch_t *sched_try_migrate_from_scheduler (psched_t *s, unsigned int rq_n)*/
+/*
+ *	attempts to migrate some work from a specific scheduler
+ */
+static pbatch_t *sched_try_migrate_from_scheduler (psched_t *s, unsigned int rq_n)
+{
+	mwindow_t *mw = &(s->mw[rq_n]);
+	uint64_t state = att64_val (&(mw->data[MWINDOW_STATE]));
+	uint64_t head, bm;
+	pbatch_t *bch = NULL;
+
+	head = MWINDOW_HEAD (state);
+	bm = state >> MWINDOW_BM_OFFSET;
+
+	while (bm && !bch) {
+		uint64_t w;
+
+		w = bm & (MWINDOW_MASK << head);
+		if (w) {
+			w = (uint64_t)bsr64 (w);
+		} else {
+			w = (uint64_t)bsr64 (bm & (MWINDOW_MASK >> ((MWINDOW_SIZE + 1) - head)));
+		}
+
+		att64_clear_bit (&(mw->data[MWINDOW_STATE]), w + MWINDOW_BM_OFFSET);
+		bch = (pbatch_t *)att64_swap (&(mw->data[w]), (uint64_t)NULL);
+
+		bm &= ~(1ULL << w);
+	}
+
+	/* Carl: don't worry about race in following line */
+	if (!bm && (head == att64_val (&(mw->data[MWINDOW_STATE])))) {
+		att64_clear_bit (&(s->mwstate), rq_n);
+	}
+
+	return bch;
+}
+/*}}}*/
+/*{{{  static pbatch_t *sched_migrate_some_work (psched_t *s)*/
+/*
+ *	migrates some work
+ */
+static pbatch_t *sched_migrate_some_work (psched_t *s)
+{
+	bitset128_t active;
+	unsigned int shift = (s->sidx & ~0x03);
+	pbatch_t *bch = NULL;
+
+	bis128_andinv (&slickss.enabled_threads, &slickss.sleeping_threads, &active);
+
+	while (!bis128_iszero (&active) && !bch) {
+		unsigned int best_n = MAX_RT_THREADS;
+		unsigned int best_pri = MAX_PRIORITY_LEVELS;
+		unsigned int i;
+
+		for (i=0; i<MAX_RT_THREADS; i++) {
+			unsigned int n = (i + shift) & (MAX_RT_THREADS - 1);
+
+			if (bis128_isbitset (&active, n)) {
+				uint64_t work = att64_val (&(slickss.schedulers[n]->mwstate));
+
+				if (work) {
+					unsigned int pri = bsf64 (work);
+
+					if (pri < best_pri) {
+						best_n = n;
+						best_pri = pri;
+					}
+				} else {
+					bis128_clear_bit (&active, n);
+				}
+			}
+		}
+
+		if (best_n < MAX_RT_THREADS) {
+			bch = sched_try_migrate_from_scheduler (slickss.schedulers[best_n], best_pri);
+		}
+	}
+
+	return bch;
+}
+/*}}}*/
+
 
 /*{{{  uint64_t sched_time_now (void)*/
 /*
@@ -1273,7 +1383,16 @@ static void slick_schedule (psched_t *s)
 					sched_load_current_batch (s, nb, 0);
 					w = sched_dequeue (s);
 
-					/* FIXME: ELSE: if we can migrate some work from elsewhere, do so */
+				} else if ((nb = sched_migrate_some_work (s)) != NULL) {
+					/* got some work! */
+					if (!batch_isdirty (nb)) {
+						slick_fatal ("slick_schedule(): s=%p, migrated clean batch at %p", s, nb);
+					}
+
+					batch_verify_integrity (nb);
+					s->loop = s->spin;
+					sched_load_current_batch (s, nb, 1);
+					w = sched_dequeue (s);
 				} else {
 					sched_new_current_batch (s);
 
@@ -1511,7 +1630,7 @@ void os_chanoutv64 (workspace_t w, void **chanptr, const uint64_t val)
  */
 void os_runp (workspace_t w, workspace_t other)
 {
-	sched_enqueue (&psched, other);
+	sched_enqueue (&psched, (workspace_t)((uint64_t)other & ~0x07));
 }
 /*}}}*/
 /*{{{  void os_stopp (workspace_t w)*/
@@ -1539,7 +1658,22 @@ void os_startp (workspace_t w, workspace_t other, void *entrypoint)
 	other[LIPtr] = (uint64_t)entrypoint;
 	other[LPriofinity] = psched.priofinity;
 
-	sched_enqueue (&psched, other);
+	if (psched.cbch.fptr) {
+		batch_verify_integrity (&(psched.cbch));
+	}
+
+	sched_enqueue_nopri (&psched, other);
+
+	batch_verify_integrity (&(psched.cbch));
+	psched.dispatches--;
+	if (psched.dispatches <= 0) {
+		/* force a reschedule */
+		w[LPriofinity] = psched.priofinity;
+		w[LIPtr] = (uint64_t)__builtin_return_address (0);
+
+		batch_enqueue_process_front (&(psched.cbch), w);
+		slick_schedule (&psched);
+	}
 }
 /*}}}*/
 /*{{{  void os_endp (workspace_t w, workspace_t other)*/
@@ -1573,6 +1707,19 @@ uint64_t os_ldtimer (workspace_t w)
 		return 0;
 	}
 	return (((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec);
+}
+/*}}}*/
+/*{{{  void os_pause (workspace_t w)*/
+/*
+ *	reschedule (yield)
+ */
+void os_pause (workspace_t w)
+{
+	w[LPriofinity] = psched.priofinity;
+	w[LIPtr] = (uint64_t)__builtin_return_address (0);
+
+	sched_enqueue_nopri (&psched, w);
+	slick_schedule (&psched);
 }
 /*}}}*/
 /*{{{  void os_alt (workspace_t w)*/
