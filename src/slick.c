@@ -60,7 +60,6 @@ slick_ss_t slickss;
 
 /*}}}*/
 
-
 /*{{{  static void slick_sigalrm (int sig)*/
 /*
  *	SIGALRM signal handler -- when the timer goes off
@@ -100,7 +99,17 @@ static void slick_sigfpe (int sig)
 }
 /*}}}*/
 
-
+/*{{{  void slick_assert (const int v, const char *file, const int line)*/
+/*
+ *	used for run-time assertions in the scheduler
+ */
+void slick_assert (const int v, const char *file, const int line)
+{
+	if (!v) {
+		slick_fatal ("slick_assert(): failed at %s:%d", file, line);
+	}
+}
+/*}}}*/
 
 /*{{{  int slick_init (const char **argv, const int argc)*/
 /*

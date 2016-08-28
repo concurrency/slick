@@ -44,9 +44,19 @@
 #include "slick_priv.h"
 #include "sutil.h"
 
+
+#ifdef SLICK_PARANOID
+#define SAFETY if (1)
+#define ASSERT(X) slick_assert((X), ##FILE, ##LINE)
+#else
+#define SAFETY if (0)
+#define ASSERT(X)
+#endif
+
+
 // #define LOCAL_DEBUG
 
-static __thread psched_t psched;		/* per-thread scheduler structure */
+static __thread psched_t psched CACHELINE_ALIGN;		/* per-thread scheduler structure */
 
 static void deadlock (void) __attribute__ ((noreturn));
 static void slick_schedule (psched_t *s) __attribute__ ((noreturn));
@@ -127,7 +137,7 @@ fprintf (stderr, "slick_threadentry(): enqueue initial process at %p, entry-poin
 	write_barrier ();
 
 	if (slickss.verbose) {
-		slick_message ("run-time thread %d about to enter scheduler.", psched.sidx);
+		slick_message ("run-time thread %d about to enter scheduler (sched at %p).", psched.sidx, &psched);
 	}
 
 	slick_schedlinkage (&psched);
@@ -359,7 +369,7 @@ static INLINE pbatch_t *sched_allocate_batch (psched_t *s)
 		bch = s->free;
 	}
 	s->free = bch->nb;
-	bch->nb = (pbatch_t *)(-1);
+	SAFETY { bch->nb = (pbatch_t *)(-1); }
 
 	return bch;
 }
@@ -582,6 +592,9 @@ static workspace_t batch_dequeue_process (pbatch_t *bch)
 	 *	give us either 0 or BATCH_EMPTIED, which we then OR
 	 *	with the real new size.
 	 */
+	
+	ASSERT ((bch->fptr != NULL) || (bch->bptr == tmp));
+	SAFETY { tmp[LLink] = ~(uint64_t)NULL; }
 
 	return tmp;
 }
@@ -686,10 +699,11 @@ static inline void *runqueue_atomic_dequeue (runqueue_t *rq, int isws)
 				att64_cas ((atomic64_t *)&(rq->bptr), (uint64_t)ptr, (uint64_t)NULL);
 				/* Note: this must be CAS'd in, should we race with something that sees NULL and sets fptr/bptr */
 
-				if (isws) {
-					att64_set ((atomic64_t *)&(((workspace_t)ptr)[LLink]), ~((uint64_t)NULL));
-				} else {
-					att64_set ((atomic64_t *)&(((pbatch_t *)ptr)->nb), (uint64_t)-1);
+				SAFETY { if (isws) {
+						att64_set ((atomic64_t *)&(((workspace_t)ptr)[LLink]), ~((uint64_t)NULL));
+					} else {
+						att64_set ((atomic64_t *)&(((pbatch_t *)ptr)->nb), (uint64_t)-1);
+					}
 				}
 
 				return ptr;
@@ -708,10 +722,11 @@ static inline void *runqueue_atomic_dequeue (runqueue_t *rq, int isws)
 			att64_set ((atomic64_t *)&(rq->fptr), (uint64_t)next);
 			write_barrier ();
 
-			if (isws) {
-				att64_set ((atomic64_t *)&(((workspace_t)ptr)[LLink]), ~((uint64_t)NULL));
-			} else {
-				att64_set ((atomic64_t *)&(((pbatch_t *)ptr)->nb), (uint64_t)-1);
+			SAFETY { if (isws) {
+					att64_set ((atomic64_t *)&(((workspace_t)ptr)[LLink]), ~((uint64_t)NULL));
+				} else {
+					att64_set ((atomic64_t *)&(((pbatch_t *)ptr)->nb), (uint64_t)-1);
+				}
 			}
 
 			return ptr;
@@ -792,7 +807,7 @@ static INLINE void sched_add_affine_batch_to_runqueue (runqueue_t *rq, pbatch_t 
  */
 static INLINE void sched_add_to_runqueue (psched_t *s, uint64_t priofinity, unsigned int rq_n, pbatch_t *bch)
 {
-	batch_verify_integrity (bch);
+	SAFETY { batch_verify_integrity (bch); }
 
 	if (PHasAffinity (priofinity)) {
 		sched_add_affine_batch_to_runqueue (&(s->rq[rq_n]), bch);
@@ -865,7 +880,7 @@ static INLINE void sched_push_batch (psched_t *s, uint64_t priofinity, pbatch_t 
 	if ((bch->size & ~BATCH_EMPTIED) == 0) {
 		slick_fatal ("sched_push_batch(): empty batch (size == 0) in scheduler at %p, batch at %p", s, bch);
 	}
-	batch_verify_integrity (bch);
+	SAFETY { batch_verify_integrity (bch); }
 
 	if (rq->priofinity) {
 		pbatch_t *p_bch;
@@ -1389,7 +1404,7 @@ static void slick_schedule (psched_t *s)
 						slick_fatal ("slick_schedule(): s=%p, migrated clean batch at %p", s, nb);
 					}
 
-					batch_verify_integrity (nb);
+					SAFETY { batch_verify_integrity (nb); }
 					s->loop = s->spin;
 					sched_load_current_batch (s, nb, 1);
 					w = sched_dequeue (s);
@@ -1658,13 +1673,14 @@ void os_startp (workspace_t w, workspace_t other, void *entrypoint)
 	other[LIPtr] = (uint64_t)entrypoint;
 	other[LPriofinity] = psched.priofinity;
 
-	if (psched.cbch.fptr) {
-		batch_verify_integrity (&(psched.cbch));
+	SAFETY { if (psched.cbch.fptr) {
+			batch_verify_integrity (&(psched.cbch));
+		}
 	}
 
 	sched_enqueue_nopri (&psched, other);
 
-	batch_verify_integrity (&(psched.cbch));
+	SAFETY { batch_verify_integrity (&(psched.cbch)); }
 	psched.dispatches--;
 	if (psched.dispatches <= 0) {
 		/* force a reschedule */

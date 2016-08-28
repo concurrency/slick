@@ -49,6 +49,13 @@ if test "$enable_debug" = yes; then
  AC_DEFINE([SLICK_DEBUG],1,[define to enable debugging messages from the scheduler])
 fi
 
+AC_ARG_ENABLE([paranoid], AS_HELP_STRING([--enable-paranoid], [enable in-scheduler safety checks (default disabled)]), [enable_paranoid=$enableval], [enable_paranoid=no])
+AC_MSG_CHECKING(whether to enable in-scheduler safety checks)
+AC_MSG_RESULT($enable_paranoid)
+if test "$enable_paranoid" = yes; then
+ AC_DEFINE([SLICK_PARANOID],1,[define to enable in-scheduler safety checks])
+fi
+
 
 dnl Borrowed from CCSP/Carl.
 AC_MSG_CHECKING(support for thread-local-storage)

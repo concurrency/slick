@@ -28,6 +28,9 @@ extern slick_ss_t slickss;
 extern uint64_t sched_time_now (void);
 extern void slick_wake_thread (psched_t *s, unsigned int sync_bit);
 
+/* in slick.c */
+extern void slick_assert (const int v, const char *file, const int line);
+
 
 #endif	/* !__SLICK_PRIV_H */
 
