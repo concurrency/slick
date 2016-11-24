@@ -43,6 +43,7 @@
 #include "slick_types.h"
 #include "slick_priv.h"
 #include "sutil.h"
+#include "mobtypes.h"
 
 
 #ifdef SLICK_PARANOID
@@ -1310,6 +1311,73 @@ static INLINE void sched_check_timer_queue (psched_t *s)
 	}
 }
 /*}}}*/
+/*{{{  static inline tqnode_t *sched_add_to_timer_queue (psched_t *s, workspace_t wptr, uint64_t time, int alt)*/
+/*
+ *	add a process to the timer queue
+ */
+static inline tqnode_t *sched_add_to_timer_queue (psched_t *s, workspace_t wptr, uint64_t time, int alt)
+{
+	tqnode_t *tn;
+
+	if (!s->tq_fptr) {
+		tn = sched_init_tqnode (s, wptr, time, alt);
+		tn->next = NULL;
+		tn->prev = NULL;
+		s->tq_fptr = tn;
+		s->tq_bptr = tn;
+
+		sched_time_settimeout (s, time);
+	} else {
+		tqnode_t *fptr = s->tq_fptr;
+		tqnode_t *bptr = s->tq_bptr;
+
+		tn = NULL;
+		do {
+			if (fptr->time > time) {
+				tn = sched_insert_tqnode (s, fptr, 1, wptr, time, alt);
+			} else if (bptr->time <= time) {
+				tn = sched_insert_tqnode (s, bptr, 0, wptr, time, alt);
+			} else {
+				fptr = fptr->next;
+				bptr = bptr->prev;
+			}
+		} while (!tn);
+	}
+
+	return tn;
+}
+/*}}}*/
+/*{{{  static inline int sched_remove_from_timer_queue (psched_t *s, tqnode_t *tn, workspace_t wptr)*/
+/*
+ *	removes a process from the timer-queue
+ */
+static inline int sched_remove_from_timer_queue (psched_t *s, tqnode_t *tn, workspace_t wptr)
+{
+	int fired = 1;
+
+	if (tn->scheduler == s) {
+		/* local timer queue -- can unlink */
+		if (tn->wptr) {
+			sched_delete_tqnode (s, tn);
+			batch_set_clean ((pbatch_t *)tn);
+			fired = 0;
+		}
+	} else {
+		/* remote timer queue */
+		if (att64_val ((atomic64_t *)&(tn->wptr)) != (uint64_t)NULL) {
+			uint64_t wptr2 = att64_swap ((atomic64_t *)&(tn->wptr), (uint64_t)NULL);
+
+			if (wptr2 != (uint64_t)NULL) {
+				fired = 0;
+				att32_set_bit (&(tn->scheduler->sync), SYNC_TQ_BIT);
+			}
+		}
+
+	}
+
+	return fired;
+}
+/*}}}*/
 
 /*{{{  static void slick_schedule (psched_t *s)*/
 /*
@@ -1465,13 +1533,8 @@ static void slick_schedule (psched_t *s)
 	fprintf (stderr, "slick_schedule(): scheduling process at %p\n", w);
 #endif
 	/* and go! */
-	__asm__ __volatile__ ("				\n" \
-		"	movq	%%rax, %%rbp		\n" \
-		"	movq	-8(%%rbp), %%rax	\n" \
-		"	movq	0(%%rcx), %%rsp		\n" \
-		"	jmp	*%%rax			\n" \
-		:: "a" (w), "c" (s) : "rbx", "rdx", "rdi", "rsi", "memory", "cc");
-	_exit (42);		/* assert: never get here (prevent gcc warning about returning non-return function) */
+	reschedule_process_out (w, s);
+//	_exit (42);		/* assert: never get here (prevent gcc warning about returning non-return function) */
 }
 /*}}}*/
 
@@ -1500,6 +1563,7 @@ void os_shutdown (workspace_t w)
 	pthread_exit (NULL);
 }
 /*}}}*/
+
 /*{{{  channel flags (integer)*/
 #define CIO_NONE	(0x00000000)
 #define CIO_INPUT	(0x00000001)
@@ -1639,6 +1703,7 @@ void os_chanoutv64 (workspace_t w, void **chanptr, const uint64_t val)
 	sched_enqueue (&psched, other);
 }
 /*}}}*/
+
 /*{{{  void os_runp (workspace_t w, workspace_t other)*/
 /*
  *	run process: just pop it on the run-queue (simple enqueue for generated code)
@@ -1738,6 +1803,7 @@ void os_pause (workspace_t w)
 	slick_schedule (&psched);
 }
 /*}}}*/
+
 /*{{{  void os_alt (workspace_t w)*/
 /*
  *	alternative start
@@ -1758,6 +1824,106 @@ void os_talt (workspace_t w)
 	att64_set ((atomic64_t *)&(w[LState]), ALT_ENABLING | ALT_NOT_READY | 1);
 	att64_set ((atomic64_t *)&(w[LTLink]), TimeNotSet_p);
 	write_barrier ();
+	return;
+}
+/*}}}*/
+/*{{{  void os_altend (workspace_t w)*/
+/*
+ *	end alternative -- resumes at the selected address (in w[LTemp])
+ */
+void os_altend (workspace_t w)
+{
+	uint64_t state = att64_val ((atomic64_t *)&(w[LState]));
+
+	w[LIPtr] = w[LTemp];
+
+	if (state != 1) {
+		w[LPriofinity] = psched.priofinity;
+		write_barrier ();
+
+		if (!att64_dec_z ((atomic64_t *)&(w[LState]))) {
+			slick_schedule (&psched);
+		}
+	}
+
+	reschedule_process_out (w, &psched);
+}
+/*}}}*/
+/*{{{  void os_altwt (workspace_t w)*/
+/*
+ *	alternative wait
+ */
+void os_altwt (workspace_t w)
+{
+	uint64_t state;
+
+	w[LTemp] = NoneSelected_o;
+
+	state = att64_val ((atomic64_t *)&(w[LState]));
+	if (state & ALT_NOT_READY) {
+		uint64_t nstate = (state | ALT_WAITING) & (~(ALT_ENABLING | ALT_NOT_READY));
+
+		w[LPriofinity] = psched.priofinity;
+		w[LIPtr] = (uint64_t)__builtin_return_address (0);
+		write_barrier ();
+
+		if (att64_cas ((atomic64_t *)&(w[LState]), state, nstate)) {
+			slick_schedule (&psched);
+		}	/* else something raced with us */
+	}
+
+	att64_clear_bit ((atomic64_t *)&(w[LState]), ALT_ENABLING_BIT);
+
+	return;
+}
+/*}}}*/
+/*{{{  void os_taltwt (workspace_t w)*/
+/*
+ *	timer alternative wait
+ */
+void os_taltwt (workspace_t w)
+{
+	uint64_t state, now;
+
+	w[LTemp] = NoneSelected_o;
+
+	now = os_ldtimer (w);
+	state = att64_val ((atomic64_t *)&(w[LState]));
+
+	if (state & ALT_NOT_READY) {
+		uint64_t nstate = (state | ALT_WAITING) & (~(ALT_ENABLING | ALT_NOT_READY));
+
+		if ((w[LTLink] == TimeSet_p) && (now <= w[LTimef])) {
+			/* already past or at timeout */
+		} else {
+			tqnode_t *tn = NULL;
+
+			w[LPriofinity] = psched.priofinity;
+			w[LIPtr] = (uint64_t)__builtin_return_address (0);
+
+			if (w[LTLink] == TimeSet_p) {
+				tn = sched_add_to_timer_queue (&psched, w, w[LTimef], 1);
+				att64_set ((atomic64_t *)&(w[LTLink]), (uint64_t)tn);
+
+				nstate++;
+			}
+
+			write_barrier ();
+
+			if (att64_cas ((atomic64_t *)&(w[LState]), state, nstate)) {
+				slick_schedule (&psched);
+			} else if (tn != NULL) {
+				w[LTLink] = TimeSet_p;
+				sched_delete_tqnode (&psched, tn);
+				batch_set_clean ((pbatch_t *)tn);
+				sched_release_tqnode (&psched, tn);
+			}
+		}
+	}
+
+	w[LTimef] = now;
+	att64_and ((atomic64_t *)&(w[LState]), ~(ALT_NOT_READY | ALT_ENABLING));
+
 	return;
 }
 /*}}}*/
@@ -1886,7 +2052,6 @@ int os_diss (workspace_t w, uint64_t paddr, const int guard)
 	return 0;
 }
 /*}}}*/
-#if 0
 /*{{{  int os_dist (workspace_t w, uint64_t timeout, uint64_t paddr, const int guard)*/
 /*
  *	disable timeout guard
@@ -1901,13 +2066,46 @@ int os_dist (workspace_t w, uint64_t timeout, uint64_t paddr, const int guard)
 
 	tlink = w[LTLink];
 	if (tlink == TimeSet_p) {
-		if (time) {
+		if (timeout <= w[LTimef]) {
+			if (w[LTemp] == NoneSelected_o) {
+				w[LTemp] = paddr;
+			}
+			return 1;
 		}
+	} else if (tlink != TimeNotSet_p) {
+		tqnode_t *tn = (tqnode_t *)tlink;
+		int fired;
+
+		w[LTLink] = TimeNotSet_p;
+
+		fired = sched_remove_from_timer_queue (&psched, tn, w);
+		if (fired) {
+			uint64_t now = tn->time;
+
+			w[LTimef] = now;
+			if (timeout > now) {
+				w[LTLink] = TimeSet_p;
+				fired = 0;
+			} else if (w[LTemp] == NoneSelected_o) {
+				w[LTemp] = paddr;
+			}
+		} else {
+			att64_dec ((atomic64_t *)&(w[LState]));
+		}
+
+		sched_release_tqnode (&psched, tn);
+
+		return fired;
 	}
 
 	return 0;
 }
 /*}}}*/
-#endif
+
+/*{{{  */
+/*
+ */
+/*}}}*/
+
 
 

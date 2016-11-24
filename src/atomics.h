@@ -66,6 +66,21 @@ static INLINE void idle_cpu (void) /*{{{ : nop, but with busy-wait hint for the 
 }
 /*}}}*/
 
+static INLINE __attribute__ ((noreturn)) void reschedule_process_out_nt (uint64_t *w, void *s) /*{{{*/
+{
+	/* Note: 'w' is a workspace pointer, 's' is the scheduler struct */
+	__asm__ __volatile__ ("				\n" \
+		"	movq	%%rax, %%rbp		\n" \
+		"	movq	-8(%%rbp), %%rax	\n" \
+		"	movq	0(%%rcx), %%rsp		\n" \
+		"	jmp	*%%rax			\n" \
+		:: "a" (w), "c" (s) : "rbx", "rdx", "rdi", "rsi", "memory", "cc");
+	_exit (42);		/* never reached */
+}
+/*}}}*/
+#define reschedule_process_out(W,S) reschedule_process_out_nt ((uint64_t *)(W), (void *)(S))
+
+
 typedef struct TAG_atomic32_t {
 	volatile uint32_t value;
 } __attribute__ ((packed)) atomic32_t;
@@ -381,6 +396,20 @@ static INLINE void att64_dec (atomic64_t *atval) /*{{{*/
 			: /* no inputs */
 			: "cc"
 			);
+}
+/*}}}*/
+static INLINE unsigned int att64_dec_z (atomic64_t *atval) /*{{{*/
+{
+	unsigned char result;
+
+	__asm__ __volatile__ ("					\n"
+			"	lock; subq	$1, %0		\n"
+			"	setz		%1		\n"
+			: "+m" (__dummy_atomic64 (atval)), "=q" (result)
+			: /* no inputs */
+			: "cc"
+			);
+	return (unsigned int)result;
 }
 /*}}}*/
 static INLINE void att64_and (atomic64_t *atval, uint64_t bits) /*{{{*/
