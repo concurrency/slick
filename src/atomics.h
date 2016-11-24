@@ -19,7 +19,7 @@
  */
 
 /*
- * Based approximately on CCSP's i386/atomics.h (mostly Carl) with parts
+ * Based approximately on CCSP's i386/atomics.h (mostly Carl Ritson) with parts
  * of that based on include/asm-i386/spinlock.h in the Linux kernel.
  *
  * and some stuff from i386/asm_ops.h and others in CCSP
@@ -360,6 +360,36 @@ static INLINE void att64_set (atomic64_t *atval, uint64_t value) /*{{{*/
 			"	movq	%1, %0		\n"
 			: "=m" (__dummy_atomic64 (atval))
 			: "r" (value)
+			);
+}
+/*}}}*/
+static INLINE void att64_inc (atomic64_t *atval) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; addq	$1, %0		\n"
+			: "+m" (__dummy_atomic64 (atval))
+			: /* no inputs */
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att64_dec (atomic64_t *atval) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; subq	$1, %0		\n"
+			: "+m" (__dummy_atomic64 (atval))
+			: /* no inputs */
+			: "cc"
+			);
+}
+/*}}}*/
+static INLINE void att64_and (atomic64_t *atval, uint64_t bits) /*{{{*/
+{
+	__asm__ __volatile__ ("					\n"
+			"	lock; andq	%1, %0		\n"
+			: "+m" (__dummy_atomic64 (atval))
+			: "ir" (bits)
+			: "cc"
 			);
 }
 /*}}}*/

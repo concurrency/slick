@@ -1761,6 +1761,153 @@ void os_talt (workspace_t w)
 	return;
 }
 /*}}}*/
+/*{{{  int os_enbc (workspace_t w, void **chanptr, const int guard)*/
+/*
+ *	enable channel -- returns guard
+ */
+int os_enbc (workspace_t w, void **chanptr, const int guard)
+{
+	uint64_t *chanval;
+	uint64_t ptr;
 
+	if (!guard) {
+		return 0;
+	}
+
+	chanval = (uint64_t *)att64_val ((atomic64_t *)chanptr);
+	ptr = (uint64_t)w | 1;
+
+	if (!chanval) {
+		chanval = (uint64_t *)att64_swap ((atomic64_t *)chanptr, ptr);
+		if (chanval) {
+			/* something else got there; put it back */
+			att64_set ((atomic64_t *)chanptr, (uint64_t)chanval);
+			if (att64_val ((atomic64_t *)&(w[LState])) & ALT_NOT_READY) {
+				att64_and ((atomic64_t *)&(w[LState]), ~(ALT_NOT_READY | ALT_ENABLING));
+			}
+			return 1;		/* guard */
+		} else {
+			att64_inc ((atomic64_t *)&(w[LState]));
+		}
+	} else if ((uint64_t)chanval != ptr) {
+		/* something in the channel and not us */
+		if (att64_val ((atomic64_t *)&(w[LState])) & ALT_NOT_READY) {
+			att64_and ((atomic64_t *)&(w[LState]), ~(ALT_NOT_READY | ALT_ENABLING));
+		}
+		return 1;			/* guard */
+	}
+
+	return 1;			/* guard */
+}
+/*}}}*/
+/*{{{  int os_enbs (workspace_t w, const int guard)*/
+/*
+ *	enable skip guard -- returns guard
+ */
+int os_enbs (workspace_t w, const int guard)
+{
+	if (!guard) {
+		return 0;
+	}
+
+	if (att64_val ((atomic64_t *)&(w[LState])) & ALT_NOT_READY) {
+		att64_and ((atomic64_t *)&(w[LState]), ~(ALT_NOT_READY | ALT_ENABLING));
+	}
+
+	return 1;
+}
+/*}}}*/
+/*{{{  int os_enbt (workspace_t w, uint64_t timeout, const int guard)*/
+/*
+ *	enable timeout guard -- returns guard
+ */
+int os_enbt (workspace_t w, uint64_t timeout, const int guard)
+{
+	if (!guard) {
+		return 0;
+	}
+
+	if (w[LTLink] == TimeNotSet_p) {
+		w[LTimef] = timeout;
+		w[LTLink] = TimeSet_p;
+	} else if (timeout < w[LTimef]) {
+		/* soonest timeout first */
+		w[LTimef] = timeout;
+	}
+
+	return 1;
+}
+/*}}}*/
+/*{{{  int os_disc (workspace_t w, void **chanptr, uint64_t paddr, const int guard)*/
+/*
+ *	disable channel -- returns non-zero if channel ready
+ */
+int os_disc (workspace_t w, void **chanptr, uint64_t paddr, const int guard)
+{
+	uint64_t *chanval;
+	
+	if (!guard) {
+		return 0;
+	}
+
+	chanval = (uint64_t *)att64_val ((atomic64_t *)chanptr);
+
+	if ((uint64_t)chanval == ((uint64_t)w | 1)) {
+		/* still us, swap back */
+		if (att64_cas ((atomic64_t *)chanptr, (uint64_t)chanval, (uint64_t)NULL)) {
+			att64_dec ((atomic64_t *)&(w[LState]));
+			return 0;		/* not ready */
+		}
+		/* if that failed, we raced and the channel is now ready :) */
+	} else if (!chanval) {
+		return 0;			/* not ready */
+	}
+
+	if (w[LTemp] == NoneSelected_o) {
+		w[LTemp] = paddr;
+	}
+
+	return 1;			/* channel ready */
+}
+/*}}}*/
+/*{{{  int os_diss (workspace_t w, uint64_t paddr, const int guard)*/
+/*
+ *	disable skip guard -- returns non-zero if selected
+ */
+int os_diss (workspace_t w, uint64_t paddr, const int guard)
+{
+	if (!guard) {
+		return 0;
+	}
+	if (w[LTemp] == NoneSelected_o) {
+		w[LTemp] = paddr;
+		return 1;
+	}
+	return 0;
+}
+/*}}}*/
+#if 0
+/*{{{  int os_dist (workspace_t w, uint64_t timeout, uint64_t paddr, const int guard)*/
+/*
+ *	disable timeout guard
+ */
+int os_dist (workspace_t w, uint64_t timeout, uint64_t paddr, const int guard)
+{
+	uint64_t tlink;
+
+	if (!guard) {
+		return 0;
+	}
+
+	tlink = w[LTLink];
+	if (tlink == TimeSet_p) {
+		if (time) {
+		}
+	}
+
+	return 0;
+}
+/*}}}*/
+#endif
 
 
