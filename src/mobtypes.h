@@ -52,21 +52,42 @@
 #define MTType		(-1)				/* offset of type word */
 
 
-/*{{{  type 0: numeric data*/
+/*{{{  type 0: numeric/basic data*/
 /*
- *	flag bits 0-2 code the type:
- *	0 = byte,
- *	1 = int16
- *	2 = int32
- *	3 = int64
- *	4 = real32
- *	5 = real64
- *	6 = reserved
- *	7 = next 8 flag bits [3..11] indicate type
+ *	flag bits [0..2] code the type:
+ *	
+ *	0 = unsigned integer
+ *	1 = signed integer
+ *	2 = floating-point
+ *	3 = string
+ *	4-7 = reserved
+ *
+ *	for integer and floating-point types, flag bits [3..10] specify the bit-width (e.g. 8, 16, 32, 64, 128).
  */
 
 #define MT_NUM		0
 #define	MT_NUM_TYPE(X)	mt_num_type(MT_FLAGS(X))
+#define MT_MAKE_NUM(I)	(MT_SIMPLE | MT_MAKE_TYPE(MT_NUM) | ((I) << MT_FLAGS_SHIFT))
+
+#define MT_NUM_UINT	0
+#define MT_NUM_SINT	1
+#define MT_NUM_FP	2
+#define MT_NUM_STRING	3
+
+#ifdef MT_DEFINES
+static inline uint64_t mt_num_type (uint64_t flags) /*{{{*/
+{
+	if ((flags & 0x07) < 3) {
+		/* integer or FP */
+		return (flags & 0x3ff);
+	} else {
+		return (flags & 0x07);
+	}
+}
+/*}}}*/
+
+#endif	/* MT_DEFINES */
+
 
 /*}}}*/
 
